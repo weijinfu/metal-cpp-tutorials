@@ -1,0 +1,512 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Metal-cpp: Offscreen Tiny Renderer</title>
+  <link rel="stylesheet" href="../style/book.css">
+  <script src="../style/syntax-highlight.js" defer></script>
+</head>
+<body>
+  <main class="book">
+    <nav class="book-nav"><a href="../index.html">Back to books</a></nav>
+    <h1 id="metal-cpp-offscreen-tiny-renderer">Metal-cpp: Offscreen Tiny Renderer</h1>
+    <p class="book-author">By <a href="https://weijinfu.github.io">Jinfu Wei</a> and <a href="https://chatgpt.com/codex">Codex</a></p>
+    <p>这一册实现一个纯 C++ 的离屏 renderer。你会在代码里创建 color attachment、depth attachment、render pipeline、vertex/index buffer、texture、sampler 和 camera uniform，然后把结果读回 CPU，写成 <code>PPM</code>、<code>PNG</code> 或 <code>JPG</code> 图片。</p>
+    <p>书里的所有结果图都来自同一个渲染程序。为了让光照差异更容易观察，本书使用两组测试资产：</p>
+    <ul>
+      <li><code>assets/meshes/uv_sphere.obj</code> + <code>assets/textures/warm_metal.ppm</code>：用于比较 <code>Albedo Only</code>、<code>Lambert</code>、<code>Blinn-Phong</code> 和 <code>PBR</code> 的结果。</li>
+      <li><code>assets/meshes/uv_sphere.obj</code> + <code>assets/textures/rusty_metal_02_basecolor.png</code>：用于验证下载的 PBR 贴图包如何接入当前 renderer。</li>
+      <li><code>assets/meshes/stanford_bunny.obj</code> + <code>assets/textures/clay.ppm</code>：用于检查复杂曲面上的明暗和高光。</li>
+    </ul>
+    <p>跟着正文完成之后，你应该能够自己替换 OBJ 和材质图片文件，并生成对应的离屏渲染结果。</p>
+
+    <h2 id="overview">Overview</h2>
+    <p>第一册已经建立了基本的 Metal 执行模型：CPU 创建资源和命令，GPU 执行 shader，然后把结果写回图片。第二册保留“输出图片”这个终点，把中间步骤换成 render pipeline：vertex shader 处理几何，fragment shader 计算材质和光照，render pass 把像素写进离屏 texture。</p>
+    <figure><img src="../images/diagrams/compute-vs-render.svg" alt="Compute pipeline and render pipeline comparison"><figcaption>第一册和第二册都把结果写成图片；区别在于第二册开始使用 vertex shader、fragment shader 和 render pass。</figcaption></figure>
+    <p>下面这段是当前阶段要执行的命令，不是写进源码文件的内容。先用它确认工程能配置、编译并运行。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>terminal</span></figcaption><pre><code class="language-sh">cmake -S . -B build
+cmake --build build --target MetalCppTinyRenderer
+
+./build/MetalCppTinyRenderer/MetalCppTinyRenderer \
+  assets/meshes/uv_sphere.obj \
+  assets/textures/warm_metal.ppm \
+  lambert \
+  build/MetalCppTinyRenderer/lambert.png</code></pre></figure>
+
+    <h2 id="project-layout">Project Layout</h2>
+    <p>先把工程拆成三个文件。后面的每一章都会往这三个文件里继续补内容：</p>
+    <p>下面这段不是要拷贝到某个源码文件里，而是当前 Book2 的最小目录分工说明。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>project layout</span></figcaption><pre><code class="language-text">main.cpp      # command line arguments and output path
+Renderer.cpp  # mesh/texture loading, camera, offscreen render pass, image writeback
+Shaders.metal # vertex shader and four fragment shader stages</code></pre></figure>
+    <p><code>main.cpp</code> 负责命令行参数，<code>Renderer.cpp</code> 负责资源和 draw path，<code>Shaders.metal</code> 负责 vertex 和 fragment shader。</p>
+
+    <h2 id="device-and-command-queue">Device and Command Queue</h2>
+    <p>先创建 <code>MTL::Device</code> 和 <code>MTL::CommandQueue</code>。这一步和第一册完全一样，后面所有 render pass 都通过这个 queue 提交。</p>
+    <figure><img src="../images/diagrams/device-command-queue.svg" alt="Device, Command Queue, and Command Buffer relationship"><figcaption><code>MTL::Device</code> 创建资源，<code>MTL::CommandQueue</code> 创建并提交 command buffer。</figcaption></figure>
+    <p>打开 <code>Renderer.cpp</code>，在设备初始化阶段新增下面这段代码。这里是新增，不是替换之前的任何函数。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>Renderer.cpp</span></figcaption><pre><code class="language-cpp">MTL::Device* device = MTL::CreateSystemDefaultDevice();
+if (!device)
+{
+    std::cerr &lt;&lt; "Metal is not available on this Mac.\n";
+    return false;
+}
+
+MTL::CommandQueue* queue = device-&gt;newCommandQueue();</code></pre></figure>
+
+    <h2 id="offscreen-render-target">Offscreen Render Target</h2>
+    <p>这一章开始创建离屏 color texture 和 depth texture。render pass 会把颜色写进 color attachment，把深度写进 depth attachment；一帧结束后，CPU 再把 color texture 读回并保存成图片文件。</p>
+    <p>继续修改 <code>Renderer.cpp</code>。先新增一个创建 color texture 的辅助代码段；它属于新的 texture 创建逻辑，可以直接加到资源创建相关函数旁边。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>Renderer.cpp</span></figcaption><pre><code class="language-cpp">MTL::TextureDescriptor* descriptor = MTL::TextureDescriptor::alloc()-&gt;init();
+descriptor-&gt;setTextureType(MTL::TextureType2D);
+descriptor-&gt;setPixelFormat(MTL::PixelFormatBGRA8Unorm);
+descriptor-&gt;setWidth(width);
+descriptor-&gt;setHeight(height);
+descriptor-&gt;setStorageMode(MTL::StorageModeManaged);
+descriptor-&gt;setUsage(MTL::TextureUsageRenderTarget);
+MTL::Texture* colorTexture = device-&gt;newTexture(descriptor);</code></pre></figure>
+    <p>然后在同一个文件里，继续在编码 draw call 之前新增 render pass descriptor。它依赖上面创建好的 <code>colorTexture</code>。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>Renderer.cpp</span></figcaption><pre><code class="language-cpp">MTL::RenderPassDescriptor* pass = MTL::RenderPassDescriptor::renderPassDescriptor();
+MTL::RenderPassColorAttachmentDescriptor* color = pass-&gt;colorAttachments()-&gt;object(0);
+color-&gt;setTexture(colorTexture);
+color-&gt;setLoadAction(MTL::LoadActionClear);
+color-&gt;setStoreAction(MTL::StoreActionStore);
+color-&gt;setClearColor(MTL::ClearColor(0.08, 0.22, 0.25, 1.0));</code></pre></figure>
+    <p>完成这一步后，程序已经具备完整的“render to texture -> read back -> write image”路径。</p>
+
+    <h2 id="mesh-and-texture-input">Mesh and Texture Input</h2>
+    <p>接下来加入外部输入。这个 renderer 读取两种文件格式：</p>
+    <ul>
+      <li><code>OBJ</code>：读取 <code>v</code>、<code>vt</code>、<code>vn</code> 和 <code>f</code></li>
+      <li><code>PPM / PNG / JPG</code>：读取 base color 贴图；参考代码通过 <code>ImageIO</code> 解码常见图片格式</li>
+    </ul>
+    <p>先回到 <code>main.cpp</code>。在命令行参数解析部分新增下面四行默认值，让程序可以从外部文件读取 mesh、texture、stage 和输出路径。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>main.cpp</span></figcaption><pre><code class="language-cpp">options.meshPath = argc &gt; 1 ? argv[1] : "assets/meshes/uv_sphere.obj";
+options.texturePath = argc &gt; 2 ? argv[2] : "assets/textures/warm_metal.ppm";
+options.stage = argc &gt; 3 ? argv[3] : "lambert";
+options.outputPath = argc &gt; 4 ? argv[4] : "build/MetalCppTinyRenderer/lambert.png";</code></pre></figure>
+    <p>保持 draw path 不变，只替换 mesh 和 texture，后面就可以用同一套程序比较不同资产上的着色结果。</p>
+    <p>如果 OBJ 没有提供 <code>vn</code>，参考代码会根据三角形几何自动生成平滑法线；如果没有 <code>vt</code>，参考代码会给出一个基础 UV，方便继续观察光照结果。</p>
+
+    <h2 id="camera-and-framing">Camera and Framing</h2>
+    <p>有了外部 mesh 之后，需要先解决“镜头放在哪里”。这里根据 mesh bounds 估计相机位置，再计算观察矩阵和投影矩阵。</p>
+    <p>继续修改 <code>Renderer.cpp</code>。在准备 uniform 数据的地方新增 camera framing 相关代码；如果你已经有 <code>mesh</code>、<code>width</code> 和 <code>height</code>，就可以接上这一段。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>Renderer.cpp</span></figcaption><pre><code class="language-cpp">Vec3 eye = fitCameraPosition(mesh);
+Vec3 target = meshCenter(mesh);
+Mat4 view = lookAt(eye, target, {0.0f, 1.0f, 0.0f});
+Mat4 proj = perspective(45.0f, float(width) / float(height), 0.1f, 100.0f);</code></pre></figure>
+    <p>运行程序时，如果模型能完整落进画面，就说明 camera framing 已经工作正常。</p>
+
+    <h2 id="vertex-shader">Vertex Shader</h2>
+    <p>第二册的 vertex shader 负责三件事：</p>
+    <ul>
+      <li>把 object-space 顶点乘上 <code>mvp</code>，送进 rasterizer</li>
+      <li>把 world position 往 fragment shader 传，给视线和高光公式用</li>
+      <li>把 normal 和 uv 继续往后传</li>
+    </ul>
+    <p>打开 <code>Shaders.metal</code>。先新增顶点输入结构体 <code>Vertex</code> 和顶点输出结构体 <code>VertexOut</code>。这是新的类型定义，可以直接放在文件开头已有的 <code>Uniforms</code> 附近。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>Shaders.metal</span></figcaption><pre><code class="language-cpp">struct Vertex
+{
+    packed_float3 position;
+    packed_float3 normal;
+    float2 uv;
+};
+
+struct VertexOut
+{
+    float4 position [[position]];
+    float3 worldPosition;
+    float3 normal;
+    float2 uv;
+};</code></pre></figure>
+    <p>结构体准备好以后，继续在 <code>Shaders.metal</code> 中新增 <code>vertex_main</code>。如果文件里已经有旧的顶点函数，就用这一版替换；如果还没有，就直接新增。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>Shaders.metal</span></figcaption><pre><code class="language-cpp">vertex VertexOut vertex_main(uint vertexID [[vertex_id]],
+                             device const Vertex* vertices [[buffer(0)]],
+                             constant Uniforms&amp; uniforms [[buffer(1)]])
+{
+    const Vertex vtx = vertices[vertexID];
+    const float3 position = float3(vtx.position);
+    const float3 normal = float3(vtx.normal);
+    VertexOut out;
+    out.position = uniforms.mvp * float4(position, 1.0);
+    out.worldPosition = (uniforms.model * float4(position, 1.0)).xyz;
+    out.normal = normalize((uniforms.model * float4(normal, 0.0)).xyz);
+    out.uv = vtx.uv;
+    return out;
+}</code></pre></figure>
+
+    <h2 id="texture-sampling">Texture Sampling</h2>
+    <p>贴图路径在这一章接入。fragment shader 先从 texture 里取出 <code>albedo</code>，后面的所有光照算法都在这个基础上继续计算。</p>
+    <p>先在 <code>Renderer.cpp</code> 里新增用于保存解码结果的数据结构。这个结构体是新的，可以直接放在 mesh / uniform 相关结构体后面。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>Renderer.cpp</span><span class="code-note">新增 TextureData 和 MaterialTextures</span></figcaption><pre><code class="language-cpp">struct TextureData
+{
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::vector&lt;uint8_t&gt; rgba;
+};
+
+struct MaterialTextures
+{
+    TextureData baseColor;
+    TextureData roughness;
+    TextureData metallic;
+    TextureData normal;
+    TextureData ao;
+};</code></pre></figure>
+    <p>如果你还在只支持 PPM 的阶段，下一步先把最基础的 PPM 解码函数写出来。下面这段代码新增到 <code>Renderer.cpp</code>，通常放在资源加载辅助函数区域。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>Renderer.cpp</span><span class="code-note">新增 loadPPM</span></figcaption><pre><code class="language-cpp">TextureData loadPPM(const std::filesystem::path&amp; path)
+{
+    std::ifstream in(path);
+    if (!in)
+    {
+        throw std::runtime_error("Could not open texture: " + path.string());
+    }
+    if (nextToken(in) != "P3")
+    {
+        throw std::runtime_error("Only ASCII P3 PPM textures are supported.");
+    }
+
+    TextureData texture;
+    texture.width = static_cast&lt;uint32_t&gt;(std::stoul(nextToken(in)));
+    texture.height = static_cast&lt;uint32_t&gt;(std::stoul(nextToken(in)));
+    const int maxValue = std::stoi(nextToken(in));
+    texture.rgba.resize(texture.width * texture.height * 4);
+
+    for (uint32_t i = 0; i &lt; texture.width * texture.height; ++i)
+    {
+        const int r = std::stoi(nextToken(in));
+        const int g = std::stoi(nextToken(in));
+        const int b = std::stoi(nextToken(in));
+        texture.rgba[i * 4 + 0] = static_cast&lt;uint8_t&gt;(r * 255 / maxValue);
+        texture.rgba[i * 4 + 1] = static_cast&lt;uint8_t&gt;(g * 255 / maxValue);
+        texture.rgba[i * 4 + 2] = static_cast&lt;uint8_t&gt;(b * 255 / maxValue);
+        texture.rgba[i * 4 + 3] = 255;
+    }
+    return texture;
+}</code></pre></figure>
+    <p>再继续在 <code>Renderer.cpp</code> 中新增 <code>PNG/JPG</code> 的解码函数。这个函数是新增的，不替换 <code>loadPPM()</code>；它和 <code>loadPPM()</code> 并列存在。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>Renderer.cpp</span><span class="code-note">新增 loadImageWithImageIO</span></figcaption><pre><code class="language-cpp">TextureData loadImageWithImageIO(const std::filesystem::path&amp; path)
+{
+    CFStringRef pathString = CFStringCreateWithCString(kCFAllocatorDefault, path.string().c_str(), kCFStringEncodingUTF8);
+    CFURLRef url = CFURLCreateWithFileSystemPath(kCFAllocatorDefault, pathString, kCFURLPOSIXPathStyle, false);
+    CFRelease(pathString);
+
+    CGImageSourceRef source = CGImageSourceCreateWithURL(url, nullptr);
+    CFRelease(url);
+    CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, nullptr);
+    CFRelease(source);
+
+    TextureData texture;
+    texture.width = static_cast&lt;uint32_t&gt;(CGImageGetWidth(image));
+    texture.height = static_cast&lt;uint32_t&gt;(CGImageGetHeight(image));
+    texture.rgba.resize(static_cast&lt;size_t&gt;(texture.width) * texture.height * 4);
+
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    CGContextRef context = CGBitmapContextCreate(
+        texture.rgba.data(),
+        texture.width,
+        texture.height,
+        8,
+        texture.width * 4,
+        colorSpace,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(colorSpace);
+
+    CGContextDrawImage(context, CGRectMake(0, 0, texture.width, texture.height), image);
+    CGContextRelease(context);
+    CGImageRelease(image);
+    return texture;
+}</code></pre></figure>
+    <p>先修改 <code>Renderer.cpp</code> 里的贴图读取函数，把原来只支持 PPM 的入口改成“按扩展名选择加载器”。这是替换旧函数调用，不是新增一个并行分支。</p>
+    <figure class="code-block is-modified"><figcaption class="code-title"><span>Renderer.cpp</span><span class="code-note">修改 loadTexture 入口，黄色 = 修改</span></figcaption><pre><code class="language-cpp"><span class="code-line">std::string extension = path.extension().string();</span>
+<span class="code-line">std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) {</span>
+<span class="code-line">    return static_cast&lt;char&gt;(std::tolower(c));</span>
+<span class="code-line">});</span>
+<span class="code-line">if (extension == ".ppm")</span>
+<span class="code-line">{</span>
+<span class="code-line">    return loadPPM(path);</span>
+<span class="code-line">}</span>
+<span class="code-line line-mark">return loadImageWithImageIO(path);</span></code></pre></figure>
+    <p>如果你要继续支持一整组 PBR 贴图，再在 <code>Renderer.cpp</code> 中新增一个材质贴图收集函数。它先读取命令行传入的 base color，再尝试自动查找同目录的 roughness、metallic、normal 和 AO。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>Renderer.cpp</span><span class="code-note">新增 loadMaterialTextures</span></figcaption><pre><code class="language-cpp">MaterialTextures loadMaterialTextures(const RenderOptions&amp; options, const Uniforms&amp; uniforms)
+{
+    MaterialTextures textures;
+    textures.baseColor = loadTexture(options.texturePath);
+    textures.roughness = makeSolidTexture(
+        static_cast&lt;uint8_t&gt;(std::clamp(uniforms.roughness, 0.0f, 1.0f) * 255.0f),
+        static_cast&lt;uint8_t&gt;(std::clamp(uniforms.roughness, 0.0f, 1.0f) * 255.0f),
+        static_cast&lt;uint8_t&gt;(std::clamp(uniforms.roughness, 0.0f, 1.0f) * 255.0f));
+    textures.metallic = makeSolidTexture(
+        static_cast&lt;uint8_t&gt;(std::clamp(uniforms.metallic, 0.0f, 1.0f) * 255.0f),
+        static_cast&lt;uint8_t&gt;(std::clamp(uniforms.metallic, 0.0f, 1.0f) * 255.0f),
+        static_cast&lt;uint8_t&gt;(std::clamp(uniforms.metallic, 0.0f, 1.0f) * 255.0f));
+    textures.normal = makeSolidTexture(128, 128, 255);
+    textures.ao = makeSolidTexture(255, 255, 255);
+
+    const std::array&lt;std::pair&lt;std::string, TextureData*&gt;, 4&gt; optionalMaps = {{
+        {"_roughness", &amp;textures.roughness},
+        {"_metallic", &amp;textures.metallic},
+        {"_normal", &amp;textures.normal},
+        {"_ao", &amp;textures.ao},
+    }};
+
+    for (const auto&amp; [suffix, target] : optionalMaps)
+    {
+        const std::filesystem::path candidate = siblingTexturePath(options.texturePath, suffix);
+        if (std::filesystem::exists(candidate))
+        {
+            *target = loadTexture(candidate);
+        }
+    }
+    return textures;
+}</code></pre></figure>
+    <p>然后继续在 <code>Renderer.cpp</code> 的 <code>renderScene()</code> 里，把旧的单张贴图读取替换成材质贴图组读取。这里是对原有 texture/sampler 初始化代码的修改。</p>
+    <figure class="code-block is-modified"><figcaption class="code-title"><span>Renderer.cpp</span><span class="code-note">修改 renderScene 里的贴图绑定，绿色 = 新增，黄色 = 修改</span></figcaption><pre><code class="language-cpp"><span class="code-line line-mark">MaterialTextures materialTextures = loadMaterialTextures(options, uniforms);</span>
+<span class="code-line line-mark">MTL::Texture* baseColorTexture = createTexture(device, materialTextures.baseColor);</span>
+<span class="code-line line-add">MTL::Texture* roughnessTexture = createTexture(device, materialTextures.roughness);</span>
+<span class="code-line line-add">MTL::Texture* metallicTexture = createTexture(device, materialTextures.metallic);</span>
+<span class="code-line line-add">MTL::Texture* normalTexture = createTexture(device, materialTextures.normal);</span>
+<span class="code-line line-add">MTL::Texture* aoTexture = createTexture(device, materialTextures.ao);</span>
+<span class="code-line">MTL::SamplerState* sampler = createSampler(device);</span></code></pre></figure>
+    <p>如果文件名以 <code>_basecolor</code> 结尾，参考代码还会自动查找同目录下的 <code>_roughness</code>、<code>_metallic</code>、<code>_normal</code> 和 <code>_ao</code>。这样命令行只需要传 base color 路径，就能把同一套 PBR 贴图包一起接进来。</p>
+
+    <h2 id="rendering-progression">Rendering Progression</h2>
+    <p>下面开始按顺序提高渲染结果。四张球体图使用同一组 mesh、texture、camera 和 light。顶点数据、相机、draw call、render pass 都保持不变，变化集中在 fragment shader 如何解释这些输入。</p>
+    <ul>
+      <li>mesh: <code>assets/meshes/uv_sphere.obj</code></li>
+      <li>texture: <code>assets/textures/warm_metal.ppm</code></li>
+      <li>camera/light: 保持不变</li>
+    </ul>
+    <p>你可以把这四个阶段理解成“在同一套 renderer 上逐步加信息”：</p>
+    <figure class="code-block"><figcaption class="code-title"><span>algorithm summary</span></figcaption><pre><code class="language-text">Albedo Only        = base color
+Lambert Diffuse    = base color + normal + light
+Blinn-Phong        = Lambert + view + highlight
+Metallic-Roughness = base color + normal + roughness
+                     metallic + AO + Fresnel/GGX</code></pre></figure>
+    <figure><img src="../images/diagrams/shading-progression-overview.svg" alt="Overview of the four shading stages"><figcaption>四个阶段的区别不是换了一套新 renderer，而是在同一个 draw path 里逐步加入新的着色项。</figcaption></figure>
+    <p>可以把这四个阶段理解成四个问题：</p>
+    <ul>
+      <li><code>Albedo Only</code>：纹理是否正确上传并映射到模型上。</li>
+      <li><code>Lambert</code>：表面朝向光源时应该亮多少。</li>
+      <li><code>Blinn-Phong</code>：观察方向改变时，高光应该如何变化。</li>
+      <li><code>PBR</code>：粗糙度、金属性和 AO 如何一起控制能量分配。</li>
+    </ul>
+
+    <h3 id="algorithm-1-albedo-only">Algorithm 1: Albedo Only</h3>
+    <p>第一步先只显示 base color。这个阶段用来检查 uv、sampler 和 texture upload 是否正确。</p>
+    <p>在 <code>Shaders.metal</code> 中新增一个新的 fragment 函数 <code>fragment_albedo</code>。这是第一版片元着色器，不需要修改其他 fragment 函数。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>Shaders.metal</span><span class="code-note">新增 fragment_albedo</span></figcaption><pre><code class="language-cpp">const float3 albedo = baseColor.sample(baseSampler, in.uv).rgb;
+return float4(albedo, 1.0);</code></pre></figure>
+    <figure><img src="../images/results/MetalCppTinyRenderer/01-sphere-albedo.png" alt="Sphere albedo only result"><figcaption>Algorithm 1 `Albedo Only`：只有 base color，没有明暗变化。它先验证纹理路径是否正确。</figcaption></figure>
+
+    <h3 id="algorithm-2-lambert-diffuse">Algorithm 2: Lambert Diffuse</h3>
+    <p>第二步加入漫反射。Lambert 模型只做一件事：比较表面法线 <code>N</code> 和光照方向 <code>L</code> 的夹角。夹角越小，点积 <code>N · L</code> 越大，表面就越亮。当前实现里，这个 <code>N</code> 可以来自几何法线，也可以来自 normal map 经过 TBN 变换后的世界空间法线。</p>
+    <figure><img src="../images/diagrams/lambert-dot-product.svg" alt="Lambert diffuse uses the dot product between normal and light direction"><figcaption>Lambert 的核心是余弦项 <code>max(N · L, 0)</code>。它把“表面朝向哪里”直接转换成明暗变化。</figcaption></figure>
+    <p>继续在 <code>Shaders.metal</code> 中新增第二个 fragment 函数 <code>fragment_lambert</code>。它是在 <code>fragment_albedo</code> 之外增加的新函数，不是修改 <code>fragment_albedo</code>。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>Shaders.metal</span><span class="code-note">新增 fragment_lambert</span></figcaption><pre><code class="language-cpp">const float3 N = sampleWorldNormal(in, normalMap, baseSampler);
+const float3 L = normalize(uniforms.lightDirection.xyz);
+const float diffuse = max(dot(N, L), 0.0);
+const float sky = 0.35 + 0.65 * clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
+const float3 color = albedo * (0.10 + 0.65 * diffuse + 0.25 * sky);
+return float4(color, 1.0);</code></pre></figure>
+    <figure><img src="../images/results/MetalCppTinyRenderer/02-sphere-lambert.png" alt="Sphere Lambert result"><figcaption>Algorithm 2 `Lambert Diffuse`：开始出现稳定的受光面和背光面。这一步解决的是“亮面和暗面从哪里来”。</figcaption></figure>
+
+    <h3 id="algorithm-3-blinn-phong">Algorithm 3: Blinn-Phong</h3>
+    <p>第三步加入 Blinn-Phong 高光。除了法线 <code>N</code> 和光照方向 <code>L</code>，现在还需要观察方向 <code>V</code>。把 <code>L</code> 和 <code>V</code> 相加并归一化，可以得到 half vector <code>H</code>。当法线更接近 <code>H</code> 时，高光会更强。它不是物理正确模型，但非常适合让新手先看懂“视角变化为什么会影响亮点位置”。</p>
+    <figure><img src="../images/diagrams/blinn-phong-half-vector.svg" alt="Blinn-Phong uses a half vector between light and view direction"><figcaption>Blinn-Phong 在 Lambert 的基础上新增了镜面高光项。它回答的是“为什么有些角度会出现亮点”。</figcaption></figure>
+    <p>这一步仍然修改 <code>Shaders.metal</code>，但方式和前两步不同：现在是新增一个新的 <code>fragment_blinn_phong</code> 函数，并且用行级标记显示它相对 Lambert 多出来的内容。</p>
+    <figure class="code-block is-modified"><figcaption class="code-title"><span>Shaders.metal</span><span class="code-note">新增 fragment_blinn_phong，绿色 = 新增，黄色 = 修改</span></figcaption><pre><code class="language-cpp"><span class="code-line line-mark">const float3 N = sampleWorldNormal(in, normalMap, baseSampler);</span>
+<span class="code-line">const float3 L = normalize(uniforms.lightDirection.xyz);</span>
+<span class="code-line line-add">const float3 V = normalize(uniforms.cameraPosition.xyz - in.worldPosition);</span>
+<span class="code-line line-add">const float3 H = normalize(L + V);</span>
+<span class="code-line">const float diffuse = max(dot(N, L), 0.0);</span>
+<span class="code-line line-add">const float sky = 0.35 + 0.65 * clamp(N.y * 0.5 + 0.5, 0.0, 1.0);</span>
+<span class="code-line line-add">const float specular = pow(max(dot(N, H), 0.0), 48.0);</span>
+<span class="code-line line-mark">const float3 color = albedo * (0.08 + 0.55 * diffuse + 0.22 * sky) + specular * 0.28;</span></code></pre></figure>
+    <figure><img src="../images/results/MetalCppTinyRenderer/03-sphere-blinn-phong.png" alt="Sphere Blinn-Phong result"><figcaption>Algorithm 3 `Blinn-Phong`：球面开始出现集中的高光，材质从“只有明暗”变成了“开始有视角相关反射特征”。</figcaption></figure>
+
+    <h3 id="algorithm-4-pbr">Algorithm 4: Metallic-Roughness PBR</h3>
+    <p>第四步切换到 metallic-roughness PBR。PBR 仍然保留漫反射和镜面反射，但不再用一个简单的常数高光近似，而是把镜面反射拆成 Fresnel、visibility 和微表面分布三部分。<code>metallic</code> 决定能量更多留在 diffuse 还是 specular，<code>roughness</code> 决定高光是锐利还是宽散，<code>ao</code> 用来抑制环境项在缝隙和遮蔽区域里过亮。</p>
+    <figure><img src="../images/diagrams/pbr-cook-torrance.svg" alt="PBR combines diffuse and Cook-Torrance specular terms"><figcaption>PBR 不是“更复杂的高光系数”，而是把材质控制拆成更明确的物理参数。</figcaption></figure>
+    <p>最后在 <code>Shaders.metal</code> 中新增 <code>fragment_pbr</code>。如果你已经完成 <code>fragment_lambert</code> 和 <code>fragment_blinn_phong</code>，这一段可以作为第四个独立 fragment 函数继续加进去。下面保留的是当前实现里最关键的一段能量分配逻辑。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>Shaders.metal</span><span class="code-note">新增 fragment_pbr</span></figcaption><pre><code class="language-cpp">const float3 albedo = srgbToLinear(baseColor.sample(baseSampler, in.uv).rgb);
+const float roughness = clamp(roughnessMap.sample(baseSampler, in.uv).r, 0.04, 1.0);
+const float metallic = clamp(metallicMap.sample(baseSampler, in.uv).r, 0.0, 1.0);
+const float ao = clamp(aoMap.sample(baseSampler, in.uv).r, 0.0, 1.0);
+const float3 N = sampleWorldNormal(in, normalMap, baseSampler);
+const float3 L = normalize(uniforms.lightDirection.xyz);
+const float3 V = normalize(uniforms.cameraPosition.xyz - in.worldPosition);
+const float3 H = normalize(L + V);
+const float NdotL = max(dot(N, L), 0.0);
+const float NdotV = max(dot(N, V), 0.0);
+const float NdotH = max(dot(N, H), 0.0);
+const float VdotH = max(dot(V, H), 0.0);
+const float D = distributionGGX(NdotH, roughness);
+const float G = geometrySchlickGGX(NdotV, roughness)
+              * geometrySchlickGGX(NdotL, roughness);
+const float3 F0 = mix(float3(0.04), albedo, metallic);
+const float3 F = fresnelSchlick(VdotH, F0);
+const float3 specular = (D * G * F) / max(4.0 * NdotV * NdotL, 1.0e-5);
+const float3 kD = (1.0 - F) * (1.0 - metallic);
+const float3 diffuse = kD * albedo / M_PI_F;
+const float skyMix = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
+const float3 ambientDiffuse = albedo * (0.18 + 0.22 * skyMix) * (1.0 - metallic) * ao;
+float3 color = (diffuse + specular) * NdotL;
+color += ambientDiffuse * uniforms.ambient;
+color = tonemapACES(color);</code></pre></figure>
+    <figure><img src="../images/results/MetalCppTinyRenderer/04-sphere-pbr.png" alt="Sphere PBR result"><figcaption>Algorithm 4 `Metallic-Roughness PBR`：现在不只是“加一个更复杂的高光”，而是开始把 diffuse、specular、roughness、metallic、AO 放进同一套能量分配里。</figcaption></figure>
+
+    <h2 id="downloaded-pbr-material">Downloaded PBR Material</h2>
+    <p>前面的四个阶段主要验证算法顺序。接下来换成一组真正的 PBR 贴图包，检查当前实现能不能读入 base color、roughness、metallic、normal 和 ambient occlusion，并把这些信息组合成最终结果。</p>
+    <p>本节使用的是 <code>Poly Haven</code> 的 <code>Rusty Metal 02</code> 1K 贴图。仓库里已经保存了拆分后的五张图：</p>
+    <ul>
+      <li><code>rusty_metal_02_basecolor.png</code></li>
+      <li><code>rusty_metal_02_roughness.png</code></li>
+      <li><code>rusty_metal_02_metallic.png</code></li>
+      <li><code>rusty_metal_02_normal.png</code></li>
+      <li><code>rusty_metal_02_ao.png</code></li>
+    </ul>
+    <p>这组材质很适合检查贴图加载路径，但当前仓库里的 metallic map 是全黑的。因此 PBR 结果更接近粗糙氧化表面，而不是强反射的裸金属。想要更真实的金属反射，需要换成 metallic 非零的材质，并进一步加入环境贴图或 IBL。</p>
+    <p>这一节不需要新增新的程序入口，只需要复用前面的 renderer。下面这段是运行命令，不是写进源码文件的内容。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>terminal</span></figcaption><pre><code class="language-sh">./build/MetalCppTinyRenderer/MetalCppTinyRenderer \
+  assets/meshes/uv_sphere.obj \
+  assets/textures/rusty_metal_02_basecolor.png \
+  lambert \
+  images/results/MetalCppTinyRenderer/08-rusty-metal-lambert.png
+
+./build/MetalCppTinyRenderer/MetalCppTinyRenderer \
+  assets/meshes/uv_sphere.obj \
+  assets/textures/rusty_metal_02_basecolor.png \
+  blinn \
+  images/results/MetalCppTinyRenderer/10-rusty-metal-blinn.png
+
+./build/MetalCppTinyRenderer/MetalCppTinyRenderer \
+  assets/meshes/uv_sphere.obj \
+  assets/textures/rusty_metal_02_basecolor.png \
+  pbr \
+  images/results/MetalCppTinyRenderer/09-rusty-metal-pbr.png</code></pre></figure>
+    <figure><img src="../images/results/MetalCppTinyRenderer/08-rusty-metal-lambert.png" alt="Rusty metal Lambert result"><figcaption>下载的 PBR 材质先用 `Lambert` 验证：base color 和 normal map 是否已经正确进入 shader。</figcaption></figure>
+    <figure><img src="../images/results/MetalCppTinyRenderer/10-rusty-metal-blinn.png" alt="Rusty metal Blinn-Phong result"><figcaption>`Blinn-Phong` 会开始给出镜面高光，但还没有 roughness 和 metallic 带来的能量分配。</figcaption></figure>
+    <figure><img src="../images/results/MetalCppTinyRenderer/09-rusty-metal-pbr.png" alt="Rusty metal PBR result"><figcaption>`PBR` 把 roughness、metallic 和 AO 一起接进来之后，roughness 和 AO 会让光照响应更稳定。因为这组材质的 metallic map 是黑色，结果应该读成氧化表面细节，而不是镜面感很强的裸露金属。</figcaption></figure>
+
+    <h2 id="test-assets">Test Assets</h2>
+    <p>下面这三组资产会在本书后半部分反复使用：</p>
+    <ul>
+      <li><code>uv_sphere.obj</code>：用于比较不同光照算法在连续曲面上的结果。</li>
+      <li><code>warm_metal.ppm</code>：用于观察同一表面在不同着色模型下的颜色和高光。</li>
+      <li><code>rusty_metal_02_*.png</code>：用于验证从网上下载的 PBR 贴图包如何接入当前 renderer。</li>
+      <li><code>stanford_bunny.obj</code>：用于检查复杂曲面上的受光、背光和高光分布。</li>
+    </ul>
+    <p>如果你要替换自己的资产，优先选带法线、uv 完整的 OBJ，以及尺寸不太大的 <code>PPM</code>、<code>PNG</code> 或 <code>JPG</code> 贴图。</p>
+
+    <h2 id="complex-geometry">Complex Geometry</h2>
+    <p>球体适合比较算法顺序，复杂模型更适合检查 mesh loader、camera framing 和高光在真实曲面上的表现。这里使用 Stanford Bunny 做第二组验证。</p>
+    <p>这一节不需要改源码，只需要复用前面已经写好的程序，换一组命令行输入重新运行。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>terminal</span></figcaption><pre><code class="language-sh">./build/MetalCppTinyRenderer/MetalCppTinyRenderer \
+  assets/meshes/stanford_bunny.obj \
+  assets/textures/clay.ppm \
+  lambert \
+  images/results/MetalCppTinyRenderer/05-bunny-lambert.png
+
+./build/MetalCppTinyRenderer/MetalCppTinyRenderer \
+  assets/meshes/stanford_bunny.obj \
+  assets/textures/clay.ppm \
+  blinn \
+  images/results/MetalCppTinyRenderer/06-bunny-blinn-phong.png</code></pre></figure>
+    <figure><img src="../images/results/MetalCppTinyRenderer/05-bunny-lambert.png" alt="Bunny Lambert result"><figcaption>Stanford Bunny `Lambert`：最先暴露的是相机 framing、法线方向和曲面体积感。</figcaption></figure>
+    <figure><img src="../images/results/MetalCppTinyRenderer/06-bunny-blinn-phong.png" alt="Bunny Blinn-Phong result"><figcaption>Stanford Bunny `Blinn-Phong`：加上高光之后，耳朵、背部和腿部的表面转折会明显更容易读。</figcaption></figure>
+
+    <h2 id="render-pass-and-readback">Render Pass and Readback</h2>
+    <p>渲染结束后，把 GPU 结果读回 CPU。由于 color texture 使用 <code>StorageModeManaged</code>，先做一次 <code>blit synchronize</code>，再调用 <code>getBytes()</code> 读取像素。</p>
+    <p>继续修改 <code>Renderer.cpp</code>。下面这段代码接在 draw call 结束之后、写文件之前；它是在原有渲染流程后面继续新增的读回步骤。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>Renderer.cpp</span></figcaption><pre><code class="language-cpp">MTL::BlitCommandEncoder* blit = commandBuffer-&gt;blitCommandEncoder();
+blit-&gt;synchronizeTexture(colorTexture, 0, 0);
+blit-&gt;endEncoding();
+
+commandBuffer-&gt;commit();
+commandBuffer-&gt;waitUntilCompleted();
+
+colorTexture-&gt;getBytes(pixels.data(),
+                       width * 4,
+                       MTL::Region::Make2D(0, 0, width, height),
+                       0);</code></pre></figure>
+    <p>继续修改 <code>Renderer.cpp</code> 的输出部分，把原来固定写 <code>PPM</code> 的调用替换成按扩展名选择输出格式。下面这段是在旧的 <code>writePPM(...)</code> 调用位置做替换。</p>
+    <figure class="code-block is-modified"><figcaption class="code-title"><span>Renderer.cpp</span><span class="code-note">修改最终输出调用，黄色 = 修改</span></figcaption><pre><code class="language-cpp"><span class="code-line line-mark">writeOutputImage(options.outputPath, pixels, options.width, options.height);</span></code></pre></figure>
+    <p>参考代码现在会根据输出路径扩展名自动选择写法：<code>.ppm</code> 继续走原来的二进制 PPM，<code>.png</code> 和 <code>.jpg</code> 通过 <code>ImageIO</code> 编码。</p>
+
+    <h2 id="cmake-changes">CMake Changes</h2>
+    <p>这一册的 target 只包含两个 C++ 源文件：</p>
+    <p>打开 <code>CMakeLists.txt</code>，在项目已有的 target 定义区域新增 Book2 的可执行文件：</p>
+    <figure class="code-block"><figcaption class="code-title"><span>CMakeLists.txt</span></figcaption><pre><code class="language-cmake">add_executable(MetalCppTinyRenderer
+    src/MetalCppTinyRenderer/main.cpp
+    src/MetalCppTinyRenderer/Renderer.cpp)</code></pre></figure>
+    <p>引入 <code>PNG/JPG</code> 贴图读写之后，链接的 framework 不再只有 Metal 本身，还要补上 <code>CoreGraphics</code> 和 <code>ImageIO</code>。</p>
+    <p>继续修改同一个 <code>CMakeLists.txt</code> target，把 include path 和 framework 链接补齐：</p>
+    <figure class="code-block"><figcaption class="code-title"><span>CMakeLists.txt</span></figcaption><pre><code class="language-cmake">target_include_directories(MetalCppTinyRenderer PRIVATE "${METAL_CPP_ROOT}")
+target_link_libraries(MetalCppTinyRenderer PRIVATE ${METAL_FRAMEWORKS})</code></pre></figure>
+    <p>如果你是从只支持 PPM 的版本继续改，记得同时把 <code>METAL_FRAMEWORKS</code> 列表补成下面这样；这一步是修改已有框架列表，不是新增一个新的变量名。</p>
+    <figure class="code-block is-modified"><figcaption class="code-title"><span>CMakeLists.txt</span><span class="code-note">修改 framework 列表，绿色 = 新增</span></figcaption><pre><code class="language-cmake"><span class="code-line">set(METAL_FRAMEWORKS</span>
+<span class="code-line">    "-framework Foundation"</span>
+<span class="code-line line-add">    "-framework CoreGraphics"</span>
+<span class="code-line line-add">    "-framework ImageIO"</span>
+<span class="code-line">    "-framework QuartzCore"</span>
+<span class="code-line">    "-framework Metal")</span></code></pre></figure>
+    <p>shader 编译步骤保持为 <code>.metal -&gt; .air -&gt; .metallib</code>：</p>
+    <p>最后仍然在 <code>CMakeLists.txt</code> 中新增 Book2 的 shader 编译命令。它是在 target 定义之后继续追加的构建步骤，不是替换前面的 <code>add_executable</code>。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>CMakeLists.txt</span></figcaption><pre><code class="language-cmake">set(BOOK2_DIR "${CMAKE_BINARY_DIR}/MetalCppTinyRenderer")
+set(BOOK2_METALLIB "${BOOK2_DIR}/default.metallib")
+add_custom_command(
+    OUTPUT "${BOOK2_METALLIB}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${BOOK2_DIR}/ModuleCache"
+    COMMAND xcrun -sdk macosx metal
+            "-fmodules-cache-path=${BOOK2_DIR}/ModuleCache"
+            -c "${CMAKE_CURRENT_SOURCE_DIR}/src/MetalCppTinyRenderer/Shaders.metal"
+            -o "${BOOK2_DIR}/Shaders.air"
+    COMMAND xcrun -sdk macosx metallib
+            "${BOOK2_DIR}/Shaders.air"
+            -o "${BOOK2_METALLIB}"
+    DEPENDS src/MetalCppTinyRenderer/Shaders.metal)</code></pre></figure>
+
+    <h2 id="reference-code">Reference Code</h2>
+    <p>最终参考代码目录是 <code>src/MetalCppTinyRenderer/</code>。如果你想核对最终实现，可以对照下面的文件清单：</p>
+    <p>下面同样是目录清单，不是要粘贴进源码的代码块。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>project layout</span></figcaption><pre><code class="language-text">src/MetalCppTinyRenderer/
+  main.cpp
+  Renderer.cpp
+  Shaders.metal
+assets/
+  meshes/uv_sphere.obj
+  meshes/stanford_bunny.obj
+  textures/warm_metal.ppm
+  textures/clay.ppm
+  textures/rusty_metal_02_basecolor.png
+  textures/rusty_metal_02_roughness.png
+  textures/rusty_metal_02_metallic.png
+  textures/rusty_metal_02_normal.png
+  textures/rusty_metal_02_ao.png
+  textures/README.md</code></pre></figure>
+    <ul>
+      <li><code>main.cpp</code>：对应 `Mesh and Texture Input` 和 `Reference Code`，负责解析 mesh、texture、stage、output path。</li>
+      <li><code>Renderer.cpp</code>：对应 `Device and Command Queue`、`Offscreen Render Target`、`Camera and Framing`、`Render Pass and Readback`，负责资源创建、draw call 和图片输出。</li>
+      <li><code>Shaders.metal</code>：对应 `Vertex Shader`、`Texture Sampling`、`Rendering Progression`，包含 <code>vertex_main</code> 和四个 fragment stage。</li>
+    </ul>
+    <p>预期输出：</p>
+    <ul>
+      <li><code>uv_sphere.obj</code> 可以生成 `albedo`、`lambert`、`blinn`、`pbr` 四张结果图。</li>
+      <li><code>rusty_metal_02_basecolor.png</code> 配合同目录下的 roughness、metallic、normal、AO 贴图，可以生成一组真实 PBR 材质结果图。</li>
+      <li><code>stanford_bunny.obj</code> 可以生成 `lambert` 和 `blinn` 两张结果图。</li>
+      <li>输出文件格式支持 <code>P6 PPM</code>、<code>PNG</code> 和 <code>JPG</code>。</li>
+    </ul>
+    <p>最后这段仍然是运行命令，用来验证你已经完成了整本书的最终版本。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>terminal</span></figcaption><pre><code class="language-sh">cmake -S . -B build
+cmake --build build --target MetalCppTinyRenderer
+
+./build/MetalCppTinyRenderer/MetalCppTinyRenderer \
+  assets/meshes/uv_sphere.obj \
+  assets/textures/rusty_metal_02_basecolor.png \
+  pbr \
+  build/MetalCppTinyRenderer/09-rusty-metal-pbr.png</code></pre></figure>
+  </main>
+</body>
+</html>

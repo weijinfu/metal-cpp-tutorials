@@ -1,0 +1,415 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Metal-cpp: Performance and Compute</title>
+  <link rel="stylesheet" href="../style/book.css">
+  <script src="../style/syntax-highlight.js" defer></script>
+</head>
+<body>
+  <main class="book">
+    <nav class="book-nav"><a href="../index.html">Back to books</a></nav>
+    <h1 id="metal-cpp-performance-and-compute">Metal-cpp: Performance and Compute</h1>
+    <p class="book-author">By <a href="https://weijinfu.github.io">Jinfu Wei</a> and <a href="https://chatgpt.com/codex">Codex</a></p>
+    <p>第二册把渲染质量主线搭起来了：mesh、texture、camera、Lambert、Blinn-Phong、PBR。第三册不继续加 GUI，也不继续加基础画质功能，而是把 Metal 当成“可测量、可扩展的 compute 平台”来组织。目标是把同一组输入做成一个稳定的离屏 baseline，然后逐步引入 profiling、frame resources、uniform ring buffer，以及 reduction、prefix sum、blur、particle、tile binning 这些常见 GPU 工作负载。</p>
+    <figure><img src="../images/diagrams/engine-frame-graph.svg" alt="Engine modules and frame resources"><figcaption>第三册的重点不是“再画一个新场景”，而是把数据、buffer、dispatch 和测量方式整理成更像真实项目的结构。</figcaption></figure>
+    <p>当前 Book3 的参考代码会实际生成这些输出：</p>
+    <ul>
+      <li><code>build/MetalCppRenderingEngine/engine-reference.ppm</code></li>
+      <li><code>build/MetalCppRenderingEngine/engine-blur.ppm</code></li>
+      <li><code>build/MetalCppRenderingEngine/engine-particles.ppm</code></li>
+      <li><code>build/MetalCppRenderingEngine/engine-tile-heatmap.ppm</code></li>
+      <li><code>build/MetalCppRenderingEngine/engine-metrics.txt</code></li>
+    </ul>
+
+    <h2 id="scope">Scope</h2>
+    <p>Book2 负责把渲染结果一步一步变好，Book3 负责把同一类程序组织得更稳定、更容易测量，也更容易扩展到更大的 compute 工作负载。这里不会再把重点放在窗口、UI 或更多材质功能上，而是集中处理 buffer、dispatch、同步和 profiling。</p>
+
+    <h2 id="overview">Overview</h2>
+    <p>Book3 仍然使用离屏输出，因为这类程序更适合做性能实验：输入固定、输出固定、没有窗口事件和 UI 生命周期干扰。你可以在同一帧里安排多个 compute pass，然后同时检查结果图和 timing。</p>
+    <p>下面这段是当前阶段要执行的命令，不是写进源码文件的内容。先用它确认 Book3 的 target 已经可以独立构建和运行。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>terminal</span></figcaption><pre><code class="language-sh">cmake -S . -B build
+cmake --build build --target MetalCppRenderingEngine
+./build/MetalCppRenderingEngine/MetalCppRenderingEngine</code></pre></figure>
+
+    <h2 id="project-layout">Project Layout</h2>
+    <p>第三册的参考代码仍然刻意保持成两个文件：一个 C++ 调度器，一个 Metal shader 文件。这样每一章新增的工作负载都能清楚地落到“CPU 侧怎样组织 buffer 和 command buffer”以及“GPU 侧 kernel 怎样读取这些数据”这两条线上。</p>
+    <p>下面这段不是要拷贝到某个源码文件里，而是当前 Book3 的目录分工。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>project layout</span></figcaption><pre><code class="language-text">main.cpp        # pipelines, frame resources, ring buffer, metrics, output files
+Shaders.metal   # reference render, blur, reduction, prefix sum, particles, tile binning</code></pre></figure>
+
+    <h2 id="reference-renderer">Reference Renderer</h2>
+    <p>先保留一个最小 reference renderer。它不是为了追求复杂画面，而是为了给后面的优化和 compute pass 一个稳定基线。当前参考实现仍然使用一个小 quad、一个固定 checker 贴图和一组稳定 camera/light 参数。</p>
+    <p>打开 <code>main.cpp</code>，先新增 Book3 的基础输入结构和静态场景数据。这一步是新文件初始化，不是修改旧章节里的函数。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">新增 Camera / Vertex / Triangle</span></figcaption><pre><code class="language-cpp">struct Vertex
+{
+    Float4 position;
+    Float4 normal;
+    Float4 uv;
+};
+
+struct Triangle
+{
+    uint32_t a;
+    uint32_t b;
+    uint32_t c;
+    uint32_t _pad;
+};
+
+struct Camera
+{
+    Float4 origin;
+    Float4 lowerLeft;
+    Float4 horizontal;
+    Float4 vertical;
+    Float4 lightDirection;
+    uint32_t width;
+    uint32_t height;
+    uint32_t textureWidth;
+    uint32_t textureHeight;
+    uint32_t triangleCount;
+    uint32_t _pad[3];
+};</code></pre></figure>
+    <p>对应的 reference render kernel 写在 <code>Shaders.metal</code>。它会对每个像素发一条射线，和两个三角形做相交，再根据 hit 的 UV 采样 checker 贴图并做最小的 Lambert 漫反射。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>Shaders.metal</span><span class="code-note">新增 render_mesh</span></figcaption><pre><code class="language-cpp">kernel void render_mesh(device const Vertex* vertices [[buffer(0)]],
+                        device const Triangle* triangles [[buffer(1)]],
+                        device const uchar4* texturePixels [[buffer(2)]],
+                        constant Camera&amp; camera [[buffer(3)]],
+                        device uchar4* output [[buffer(4)]],
+                        uint2 id [[thread_position_in_grid]])</code></pre></figure>
+    <figure><img src="../images/results/MetalCppRenderingEngine/05-engine-reference.png" alt="Book3 reference render"><figcaption>Book3 的 reference render。它本身不复杂，但它提供了一个固定输入和固定输出，适合作为后面 blur、reduction 和 timing 的基线。</figcaption></figure>
+
+    <h2 id="profiling-first">Profiling First</h2>
+    <p>优化前先测量。第三册先把一帧拆成三个时间段：</p>
+    <ul>
+      <li>CPU encode time：CPU 创建 encoder、绑定 buffer、安排 dispatch 的时间</li>
+      <li>CPU wait time：<code>waitUntilCompleted()</code> 让 CPU 停下来等待 GPU 的时间</li>
+      <li>GPU time：Metal 提供的 command buffer GPU 执行时间</li>
+    </ul>
+    <figure><img src="../images/diagrams/profiling-timeline.svg" alt="CPU and GPU profiling timeline"><figcaption>如果只看总时长，很容易不知道瓶颈是在 CPU encode、GPU 执行，还是 CPU 自己在等待。</figcaption></figure>
+    <p>在 <code>main.cpp</code> 里新增 timing 记录。下面这段接在 command buffer 编码和提交附近，用来替换“只 commit 不测量”的旧写法。</p>
+    <figure class="code-block is-modified"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">修改 command buffer 提交处，绿色 = 新增</span></figcaption><pre><code class="language-cpp"><span class="code-line line-add">const auto cpuFrameStart = std::chrono::high_resolution_clock::now();</span>
+<span class="code-line">MTL::CommandBuffer* commandBuffer = queue-&gt;commandBuffer();</span>
+<span class="code-line line-add">const auto cpuEncodeEnd = std::chrono::high_resolution_clock::now();</span>
+<span class="code-line">commandBuffer-&gt;commit();</span>
+<span class="code-line line-add">const auto cpuWaitStart = std::chrono::high_resolution_clock::now();</span>
+<span class="code-line">commandBuffer-&gt;waitUntilCompleted();</span>
+<span class="code-line line-add">const auto cpuFrameEnd = std::chrono::high_resolution_clock::now();</span>
+<span class="code-line line-add">metrics.gpuMs = (commandBuffer-&gt;GPUEndTime() - commandBuffer-&gt;GPUStartTime()) * 1000.0;</span></code></pre></figure>
+    <p>运行当前参考实现后，<code>engine-metrics.txt</code> 会写出一组真实数值。当前这份输出里已经能看到“CPU encode 几乎不是问题，主要时间落在等待 GPU 完成”：</p>
+    <figure class="code-block"><figcaption class="code-title"><span>engine-metrics.txt</span></figcaption><pre><code class="language-text">cpu_encode_ms: 0.035
+cpu_wait_ms: 3.408
+cpu_frame_ms: 3.449
+gpu_frame_ms: 0.482
+gpu_kernel_ms: 2.596
+average_luminance: 0.207</code></pre></figure>
+
+    <h2 id="cpu-gpu-synchronization">CPU/GPU Synchronization</h2>
+    <p>第三册开始显式区分“CPU 什么时候可以继续写数据”和“GPU 什么时候已经把上一轮数据读完”。当前参考代码仍然用 <code>waitUntilCompleted()</code> 收尾，因为它最适合教学：你可以稳定读回结果图和 metrics，同时清楚看到等待时间已经被单独测出来了。</p>
+    <p>在 <code>main.cpp</code> 的帧循环里，先把本帧要写的 shared buffer 清理并填好，再提交 command buffer，最后统一等待。这一段是在已有主循环上继续修改，不是新增独立函数。</p>
+    <figure class="code-block is-modified"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">修改 frame loop，同步 CPU 写入和 GPU 读取</span></figcaption><pre><code class="language-cpp"><span class="code-line">FrameResources&amp; frame = frames[frameIndex % kFrameCount];</span>
+<span class="code-line line-add">frame.ringHead = 0;</span>
+<span class="code-line line-add">std::memcpy(frame.prefixInput-&gt;contents(), prefixFlags.data(), prefixFlags.size() * sizeof(uint32_t));</span>
+<span class="code-line line-add">std::memcpy(frame.particleA-&gt;contents(), particles.data(), particles.size() * sizeof(Particle));</span>
+<span class="code-line line-add">clearBuffer(frame.renderOutput, pixelCount * 4);</span>
+<span class="code-line line-add">clearBuffer(frame.blurOutput, pixelCount * 4);</span>
+<span class="code-line line-add">clearBuffer(frame.partialSums, partialCount * sizeof(float));</span>
+<span class="code-line">commandBuffer-&gt;commit();</span>
+<span class="code-line">commandBuffer-&gt;waitUntilCompleted();</span></code></pre></figure>
+    <p>如果以后把 Book3 扩成真正的多帧 in-flight 程序，这一节的思路保持不变，只是把“每帧都等完”改成“只在读回或 ring buffer 即将覆盖时等待”。</p>
+
+    <h2 id="frame-resources">Frame Resources</h2>
+    <p>Book2 可以直接在一个 shared buffer 里写完再等 GPU 读完。Book3 要开始显式区分“哪些资源可以长期复用，哪些资源属于某一帧的暂存结果”。</p>
+    <figure><img src="../images/diagrams/frame-resources-ring-buffer.svg" alt="Frame resources and ring buffer layout"><figcaption>每一帧拥有自己的输出 buffer 和自己的 uniform ring，这样 CPU 更新下一帧数据时不会踩到 GPU 还在读的内容。</figcaption></figure>
+    <p>在 <code>main.cpp</code> 里新增 <code>FrameResources</code>。这是新的结构体，可以直接加到辅助结构体定义区域。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">新增 FrameResources</span></figcaption><pre><code class="language-cpp">struct FrameResources
+{
+    MTL::Buffer* uniformRing = nullptr;
+    MTL::Buffer* renderOutput = nullptr;
+    MTL::Buffer* blurOutput = nullptr;
+    MTL::Buffer* particlePreview = nullptr;
+    MTL::Buffer* partialSums = nullptr;
+    MTL::Buffer* prefixInput = nullptr;
+    MTL::Buffer* prefixOutput = nullptr;
+    MTL::Buffer* tileCounts = nullptr;
+    MTL::Buffer* particleA = nullptr;
+    MTL::Buffer* particleB = nullptr;
+    uint32_t ringHead = 0;
+};</code></pre></figure>
+    <p>然后在主循环里按 frame index 轮换它们。这里虽然最终还是离屏程序，仍然可以先把资源组织成真实渲染循环会使用的形状。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">新增 frame 轮换</span></figcaption><pre><code class="language-cpp">std::array&lt;FrameResources, kFrameCount&gt; frames{};
+
+for (uint32_t frameIndex = 0; frameIndex &lt; kFrameCount; ++frameIndex)
+{
+    FrameResources&amp; frame = frames[frameIndex % kFrameCount];
+    frame.ringHead = 0;
+    clearBuffer(frame.renderOutput, pixelCount * 4);
+    clearBuffer(frame.blurOutput, pixelCount * 4);
+    clearBuffer(frame.tileCounts, tileCount * sizeof(uint32_t));
+}</code></pre></figure>
+
+    <h2 id="uniform-ring-buffer">Uniform Ring Buffer</h2>
+    <p>第三册的程序一帧里会安排多个不同的 compute pass：render、blur、reduction、prefix sum、particle、tile binning。不要为每个 pass 创建一个新的小 buffer。更稳妥的做法是一个大 shared buffer，里面按 256 字节对齐切片，每个 pass 绑定不同 offset。</p>
+    <p>先在 <code>main.cpp</code> 中新增 ring allocator。这是新的辅助函数，可以放在资源创建函数附近。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">新增 allocateRing</span></figcaption><pre><code class="language-cpp">RingSlice allocateRing(FrameResources&amp; frame, uint32_t bytes)
+{
+    const uint32_t alignedBytes = align256(bytes);
+    RingSlice slice;
+    slice.offset = frame.ringHead;
+    slice.cpuPointer = static_cast&lt;uint8_t*&gt;(frame.uniformRing-&gt;contents()) + frame.ringHead;
+    frame.ringHead += alignedBytes;
+    return slice;
+}</code></pre></figure>
+    <p>接着把各个 pass 的参数写到不同 slice，再把同一个 <code>uniformRing</code> 用不同 offset 绑定给 encoder。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">新增不同 uniform slice</span></figcaption><pre><code class="language-cpp">const RingSlice cameraSlice = allocateRing(frame, sizeof(Camera));
+std::memcpy(cameraSlice.cpuPointer, &amp;camera, sizeof(Camera));
+
+const RingSlice imageSlice = allocateRing(frame, sizeof(ImageParams));
+std::memcpy(imageSlice.cpuPointer, &amp;imageParams, sizeof(ImageParams));
+
+encoder-&gt;setBuffer(frame.uniformRing, cameraSlice.offset, 3);
+encoder-&gt;setBuffer(frame.uniformRing, imageSlice.offset, 2);</code></pre></figure>
+
+    <h2 id="data-layout">Data Layout</h2>
+    <p>第三册第一次需要认真看数据布局。当前粒子系统采用 AoS，也就是每个粒子把 <code>position</code> 和 <code>velocity</code> 放在一起。因为这一册的 <code>particle_step</code> 每次都会同时读取和写回这两个字段，这种布局更直观，也更适合新手先把 ping-pong 更新跑通。</p>
+    <p>在 <code>main.cpp</code> 和 <code>Shaders.metal</code> 里都先保持同一个 <code>Particle</code> 结构。这是新结构定义，不是在旧函数中补几行。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">新增 Particle（AoS）</span></figcaption><pre><code class="language-cpp">struct Particle
+{
+    Float2 position;
+    Float2 velocity;
+};</code></pre></figure>
+    <p>等你把这一版跑通后，可以再尝试把它拆成 SoA，例如单独的 <code>positionX[]</code>、<code>positionY[]</code>、<code>velocityX[]</code>、<code>velocityY[]</code>。教程当前版本先不强行切到 SoA，因为 Book3 的重点是让你看到“布局影响后续优化空间”，而不是一次引入两套粒子实现。</p>
+
+    <h2 id="pipeline-cache">Pipeline and Resource Cache</h2>
+    <p>Book3 不应该在每一帧里重复创建 pipeline。当前参考代码把所有 compute pipeline 在启动阶段统一创建好，然后整帧复用。这就是本书里的最小 pipeline cache。</p>
+    <p>在 <code>main.cpp</code> 中新增 <code>Pipelines</code> 结构和辅助函数。这是新的启动期代码，可以直接加到资源创建辅助函数附近。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">新增 Pipelines cache</span></figcaption><pre><code class="language-cpp">struct Pipelines
+{
+    MTL::ComputePipelineState* render = nullptr;
+    MTL::ComputePipelineState* blur = nullptr;
+    MTL::ComputePipelineState* reduction = nullptr;
+    MTL::ComputePipelineState* prefix = nullptr;
+    MTL::ComputePipelineState* particleStep = nullptr;
+    MTL::ComputePipelineState* particleRaster = nullptr;
+    MTL::ComputePipelineState* tile = nullptr;
+};</code></pre></figure>
+    <figure class="code-block"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">新增 makePipelines / releasePipelines</span></figcaption><pre><code class="language-cpp">Pipelines pipelines = makePipelines(device, library);
+if (!pipelinesReady(pipelines))
+{
+    releasePipelines(pipelines);
+    return 1;
+}</code></pre></figure>
+    <p>教程这里先把“cache”理解为“创建一次，重复使用”。如果以后继续扩展 Book3，再把 texture、sampler、argument buffer 的缓存策略放进同一套路里。</p>
+
+    <h2 id="threadgroup-shape">Threadgroup Shape</h2>
+    <p>不同 kernel 不该盲目共用同一个 threadgroup 形状。二维图像 pass 更适合二维 tile；粒子更新和 tile binning 更适合一维批次；reduction 需要让 threadgroup 大小和共享 scratch 数组匹配。</p>
+    <p>在 <code>main.cpp</code> 中，把硬编码的 threadgroup 尺寸提成常量和小辅助函数。下面这段是在已有常量区和辅助函数区继续补充。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">新增 threadgroup helpers</span></figcaption><pre><code class="language-cpp">constexpr uint32_t kThreadgroup1D = 256;
+constexpr uint32_t kImageThreadsX = 16;
+constexpr uint32_t kImageThreadsY = 8;
+constexpr uint32_t kParticleThreads = 64;
+
+MTL::Size makeImageThreadgroup()
+{
+    return MTL::Size::Make(kImageThreadsX, kImageThreadsY, 1);
+}
+
+MTL::Size makeLinearThreadgroup(uint32_t width)
+{
+    return MTL::Size::Make(width, 1, 1);
+}</code></pre></figure>
+    <p>然后把 dispatch 调用改成带语义的 helper，而不是到处写裸数字：</p>
+    <figure class="code-block is-modified"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">修改 dispatchThreads，黄色 = 旧值被替换</span></figcaption><pre><code class="language-cpp"><span class="code-line">encoder-&gt;dispatchThreads(MTL::Size::Make(kWidth, kHeight, 1),</span>
+<span class="code-line line-mark">                         makeImageThreadgroup());</span>
+
+<span class="code-line">encoder-&gt;dispatchThreads(MTL::Size::Make(kParticleCount, 1, 1),</span>
+<span class="code-line line-mark">                         makeLinearThreadgroup(kParticleThreads));</span></code></pre></figure>
+
+    <h2 id="command-encoding">Command Encoding Strategy</h2>
+    <p>Book3 的 command buffer 不再只装一个 kernel。当前参考实现一帧里会依次编码这些工作：</p>
+    <figure class="code-block"><figcaption class="code-title"><span>dispatch order</span></figcaption><pre><code class="language-text">1. render_mesh
+2. reduce_luminance
+3. blur_image
+4. prefix_sum_16
+5. particle_step (ping-pong for 24 steps)
+6. rasterize_particles
+7. tile_bin_particles</code></pre></figure>
+    <p>这套顺序的目标不是“最强性能”，而是把不同类型的 compute workload 都塞进同一个 command buffer，让你能同时看 timing、结果图和指标文件。</p>
+
+    <h2 id="parallel-reduction">Parallel Reduction</h2>
+    <p>Reduction 是第三册第一个真正的“性能型 compute kernel”。它把整张 reference image 的亮度压缩成一组 partial sums，再由 CPU 把这些 partial sums 做最终求和。这样可以先理解 threadgroup 内归约，再考虑更复杂的纯 GPU 多阶段归约。</p>
+    <p>在 <code>Shaders.metal</code> 中新增 <code>reduce_luminance</code>。这是新 kernel，不替换 <code>render_mesh</code>。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>Shaders.metal</span><span class="code-note">新增 reduce_luminance</span></figcaption><pre><code class="language-cpp">threadgroup float scratch[256];
+
+float value = 0.0;
+if (gid &lt; params.pixelCount)
+{
+    const uchar4 pixel = input[gid];
+    const float3 rgb = float3(pixel.r, pixel.g, pixel.b) / 255.0;
+    value = dot(rgb, float3(0.2126, 0.7152, 0.0722));
+}
+scratch[tid] = value;
+threadgroup_barrier(mem_flags::mem_threadgroup);
+
+for (uint stride = 128; stride &gt; 0; stride &gt;&gt;= 1)
+{
+    if (tid &lt; stride)
+    {
+        scratch[tid] += scratch[tid + stride];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+}</code></pre></figure>
+    <p>CPU 侧最终只需要把 partial sums 再加一次，就能得到平均亮度：</p>
+    <figure class="code-block"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">新增 average luminance 汇总</span></figcaption><pre><code class="language-cpp">const float* partialSums = static_cast&lt;const float*&gt;(frame.partialSums-&gt;contents());
+double luminanceSum = 0.0;
+for (uint32_t i = 0; i &lt; partialCount; ++i)
+{
+    luminanceSum += partialSums[i];
+}
+metrics.averageLuminance = luminanceSum / static_cast&lt;double&gt;(pixelCount);</code></pre></figure>
+
+    <h2 id="prefix-sum">Prefix Sum</h2>
+    <p>Prefix sum 比 reduction 多一步：它不是把所有数据压成一个值，而是把“前面有多少个有效元素”写成每个位置自己的 offset。Book3 先用一个 16 元素的小例子把算法轮廓跑通。</p>
+    <figure><img src="../images/diagrams/prefix-sum-stages.svg" alt="Prefix sum stages"><figcaption>先做 threadgroup 内局部 scan，再扩到更大的多组版本。这一册先把 block-local 版本写清楚。</figcaption></figure>
+    <p>在 <code>Shaders.metal</code> 中新增 <code>prefix_sum_16</code>。它使用 threadgroup scratch 数组做一版简单的 Hillis-Steele scan。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>Shaders.metal</span><span class="code-note">新增 prefix_sum_16</span></figcaption><pre><code class="language-cpp">threadgroup uint scratch[16];
+scratch[tid] = input[tid];
+threadgroup_barrier(mem_flags::mem_threadgroup);
+
+for (uint offset = 1; offset &lt; params.count; offset &lt;&lt;= 1)
+{
+    uint value = scratch[tid];
+    if (tid &gt;= offset)
+    {
+        value += scratch[tid - offset];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    scratch[tid] = value;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+output[tid] = (tid == 0) ? 0 : scratch[tid - 1];</code></pre></figure>
+    <p>当前参考程序会把一个固定 flag 数组和它对应的 prefix output 写进 <code>engine-metrics.txt</code>，便于核对算法是否正确：</p>
+    <figure class="code-block"><figcaption class="code-title"><span>engine-metrics.txt</span></figcaption><pre><code class="language-text">prefix_input:  1 0 1 1 0 1 0 1 1 0 0 1 1 1 0 1
+prefix_output: 0 1 1 2 3 3 4 4 5 6 6 6 7 8 9 9</code></pre></figure>
+
+    <h2 id="image-convolution">Image Convolution</h2>
+    <p>第一册已经做过 blur。第三册把它放回性能路线里，目的不是重新教一次卷积，而是让 blur 成为一个“第二个稳定工作负载”：它会读取邻域，会大量访问 image buffer，也很适合以后继续尝试 threadgroup memory 优化。</p>
+    <p>在 <code>Shaders.metal</code> 中新增 <code>blur_image</code>。这是新 kernel，不替换第一册的实现。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>Shaders.metal</span><span class="code-note">新增 blur_image</span></figcaption><pre><code class="language-cpp">const int weights[3][3] = {
+    {1, 2, 1},
+    {2, 4, 2},
+    {1, 2, 1},
+};
+
+for (int offsetY = -1; offsetY &lt;= 1; ++offsetY)
+{
+    for (int offsetX = -1; offsetX &lt;= 1; ++offsetX)
+    {
+        const uint sampleX = uint(clamp(int(id.x) + offsetX, 0, int(params.width) - 1));
+        const uint sampleY = uint(clamp(int(id.y) + offsetY, 0, int(params.height) - 1));
+        const uchar4 sample = source[sampleY * params.width + sampleX];
+        accum += float3(sample.r, sample.g, sample.b) * weight;
+    }
+}</code></pre></figure>
+    <figure><img src="../images/results/MetalCppRenderingEngine/06-engine-blur.png" alt="Blurred reference render"><figcaption>同一张 reference image 经过 3x3 Gaussian blur 之后的结果。它作为 Book3 的第二张稳定输出图，用来验证卷积型 kernel。</figcaption></figure>
+
+    <h2 id="particle-simulation">Particle Simulation</h2>
+    <p>粒子系统是第三册里“compute 更新 -> compute 可视化”的例子。当前参考实现没有再引入 render pipeline，而是继续坚持纯 compute：先更新粒子位置，再用另一个 kernel 直接把粒子画进离屏 image buffer。</p>
+    <p>先在 <code>Shaders.metal</code> 中新增 <code>particle_step</code>。它读取当前粒子数组，写到下一块粒子数组，实现最小的 ping-pong 更新。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>Shaders.metal</span><span class="code-note">新增 particle_step</span></figcaption><pre><code class="language-cpp">kernel void particle_step(device const Particle* currentParticles [[buffer(0)]],
+                          device Particle* nextParticles [[buffer(1)]],
+                          constant ParticleParams&amp; params [[buffer(2)]],
+                          uint id [[thread_position_in_grid]])
+{
+    Particle particle = currentParticles[id];
+    particle.position += particle.velocity * params.dt;
+    if (particle.position.x &lt; 0.05 || particle.position.x &gt; 0.95)
+    {
+        particle.velocity.x *= -1.0;
+    }
+    if (particle.position.y &lt; 0.08 || particle.position.y &gt; 0.92)
+    {
+        particle.velocity.y *= -1.0;
+    }
+    nextParticles[id] = particle;
+}</code></pre></figure>
+    <p>然后再新增 <code>rasterize_particles</code>，把粒子数组转成一张可见图像。当前实现让每个像素遍历所有粒子并叠加 glow，重点是结果稳定，便于后续观察 tile binning 的作用。</p>
+    <figure><img src="../images/results/MetalCppRenderingEngine/07-engine-particles.png" alt="Particle preview generated by compute"><figcaption>Book3 的粒子预览图。它展示了 compute 更新之后，另一个 compute pass 如何直接消费同一批粒子数据。</figcaption></figure>
+
+    <h2 id="tile-culling">Tile-Based Culling</h2>
+    <p>Tile culling 的核心思想是“先把对象分配到小块里，再让后续阶段只看自己那一小块”。第三册先不做完整的 tile lighting，而是用粒子示例做一个可运行的 tile binning：每个粒子根据自己落在哪个 tile，给那个 tile 的计数器做一次原子加一。</p>
+    <figure><img src="../images/diagrams/tile-culling-grid.svg" alt="Tile binning overview"><figcaption>tile binning 先压缩“谁可能影响这个区域”，后续 pass 才能少看很多无关数据。</figcaption></figure>
+    <p>在 <code>Shaders.metal</code> 中新增 <code>tile_bin_particles</code>：</p>
+    <figure class="code-block"><figcaption class="code-title"><span>Shaders.metal</span><span class="code-note">新增 tile_bin_particles</span></figcaption><pre><code class="language-cpp">const uint pixelX = min(uint(position.x * params.width), params.width - 1);
+const uint pixelY = min(uint(position.y * params.height), params.height - 1);
+const uint tileX = min(pixelX / params.tileSize, params.tilesX - 1);
+const uint tileY = min(pixelY / params.tileSize, params.tilesY - 1);
+const uint tileIndex = tileY * params.tilesX + tileX;
+atomic_fetch_add_explicit(&amp;tileCounts[tileIndex], 1u, memory_order_relaxed);</code></pre></figure>
+    <p>CPU 侧再把这个 tileCounts buffer 转成热力图，方便快速看分布是否正确：</p>
+    <figure><img src="../images/results/MetalCppRenderingEngine/08-engine-tile-heatmap.png" alt="Tile occupancy heatmap"><figcaption>tile binning 的热力图结果。颜色越热，说明这个 tile 里分到的粒子越多。Book3 用它来验证 tile list 构建逻辑。</figcaption></figure>
+
+    <h2 id="verification">Verification</h2>
+    <p>第三册的验证不再只有“有没有一张图”。当前参考实现每次运行后都应该同时给出：</p>
+    <ul>
+      <li><code>engine-reference.ppm</code>：reference render 是否稳定</li>
+      <li><code>engine-blur.ppm</code>：blur kernel 是否正常</li>
+      <li><code>engine-particles.ppm</code>：particle ping-pong 是否正常</li>
+      <li><code>engine-tile-heatmap.ppm</code>：tile binning 是否正常</li>
+      <li><code>engine-metrics.txt</code>：profiling、average luminance、prefix output、tile counts</li>
+    </ul>
+    <p>如果你继续优化 threadgroup size、buffer layout 或 kernel 数量，先固定这批输出，再逐步比较 timing 变化。</p>
+
+    <h2 id="gpu-capture-debug">GPU Capture and Debug</h2>
+    <p>Book3 的结果图和 metrics 只能告诉你“结果是否变化”和“一帧大概花了多久”。如果要看每个 encoder、每个 dispatch 和每个 buffer 绑定，就需要 Xcode GPU Capture。</p>
+    <p>当前参考程序是命令行 target，可以直接从 Xcode 或 Instruments 启动它。调试时先关注三件事：</p>
+    <ul>
+      <li><code>render_mesh</code>、<code>blur_image</code>、<code>reduce_luminance</code>、<code>prefix_sum_16</code>、<code>particle_step</code>、<code>rasterize_particles</code>、<code>tile_bin_particles</code> 是否按书中顺序出现在同一个 command buffer 里。</li>
+      <li>每个 pass 绑定的 buffer index 是否和 <code>Shaders.metal</code> 里的 <code>[[buffer(n)]]</code> 一致。</li>
+      <li>threadgroup size 是否符合本章设置：图像 pass 使用二维 threadgroup，粒子和 tile pass 使用一维 threadgroup，reduction 使用 256 个 thread。</li>
+    </ul>
+    <p>如果某张结果图是黑的，先看 GPU Capture 里的 resource binding；如果 metrics 明显变慢，先看 command buffer 中哪个 dispatch 占用时间变长。这样调试顺序和本书的教学顺序保持一致。</p>
+
+    <h2 id="cmake-changes">CMake Changes</h2>
+    <p>第三册的 target 仍然保持纯 C++，不新增 GUI 依赖。当前 `CMakeLists.txt` 里 Book3 的最小 target 定义如下：</p>
+    <figure class="code-block"><figcaption class="code-title"><span>CMakeLists.txt</span></figcaption><pre><code class="language-cmake">add_executable(MetalCppRenderingEngine
+    src/MetalCppRenderingEngine/main.cpp)</code></pre></figure>
+    <p>由于 shader 仍然走单独编译，Book3 的 `.metal -> .air -> .metallib` 规则保持和前两册一致：</p>
+    <figure class="code-block"><figcaption class="code-title"><span>CMakeLists.txt</span></figcaption><pre><code class="language-cmake">set(BOOK3_DIR "${CMAKE_BINARY_DIR}/MetalCppRenderingEngine")
+set(BOOK3_METALLIB "${BOOK3_DIR}/default.metallib")
+add_custom_command(
+    OUTPUT "${BOOK3_METALLIB}"
+    COMMAND xcrun -sdk macosx metal
+            "-fmodules-cache-path=${BOOK3_DIR}/ModuleCache"
+            -c "${CMAKE_CURRENT_SOURCE_DIR}/src/MetalCppRenderingEngine/Shaders.metal"
+            -o "${BOOK3_DIR}/Shaders.air"
+    COMMAND xcrun -sdk macosx metallib
+            "${BOOK3_DIR}/Shaders.air"
+            -o "${BOOK3_METALLIB}"
+    DEPENDS src/MetalCppRenderingEngine/Shaders.metal)</code></pre></figure>
+
+    <h2 id="reference-code">Reference Code</h2>
+    <p>最终参考代码目录是 <code>src/MetalCppRenderingEngine/</code>。如果你想核对当前 Book3 的最终版本，可以对照下面的文件清单：</p>
+    <p>下面同样是目录清单，不是要粘贴进源码的代码块。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>project layout</span></figcaption><pre><code class="language-text">src/MetalCppRenderingEngine/
+  main.cpp
+  Shaders.metal
+build/MetalCppRenderingEngine/
+  engine-reference.ppm
+  engine-blur.ppm
+  engine-particles.ppm
+  engine-tile-heatmap.ppm
+  engine-metrics.txt</code></pre></figure>
+    <ul>
+      <li><code>main.cpp</code>：对应 `Reference Renderer`、`Profiling First`、`CPU/GPU Synchronization`、`Frame Resources`、`Uniform Ring Buffer`、`Data Layout`、`Pipeline and Resource Cache`、`Threadgroup Shape`、`Verification`，负责 pipeline、dispatch、metrics 和输出文件。</li>
+      <li><code>Shaders.metal</code>：对应 `Reference Renderer`、`Parallel Reduction`、`Prefix Sum`、`Image Convolution`、`Particle Simulation`、`Tile-Based Culling`，包含所有 Book3 的 compute kernel。</li>
+    </ul>
+    <p>最后这段仍然是运行命令，用来验证你已经完成了整本书的当前版本。</p>
+    <figure class="code-block"><figcaption class="code-title"><span>terminal</span></figcaption><pre><code class="language-sh">cmake -S . -B build
+cmake --build build --target MetalCppRenderingEngine
+./build/MetalCppRenderingEngine/MetalCppRenderingEngine</code></pre></figure>
+  </main>
+</body>
+</html>

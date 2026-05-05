@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 460" role="img">
+  <rect width="1060" height="460" fill="#102a33"/>
+  <style>
+    .title{font:700 42px Georgia,serif;fill:#f3efe2}
+    .label{font:700 28px Helvetica,Arial,sans-serif;fill:#f3efe2}
+    .small{font:20px Helvetica,Arial,sans-serif;fill:#d7e3df}
+    .mono{font:22px Menlo,Consolas,monospace;fill:#ffd88a}
+    .box{fill:#173c45;stroke:#7ea9b1;stroke-width:3}
+    .light{fill:#fffaf0;stroke:#d8d0c0;stroke-width:3}
+    .gold{fill:#8d7047}
+    .blue{fill:#34718a}
+    .green{fill:#5b8f54}
+    .line{stroke:#f3efe2;stroke-width:7;stroke-linecap:round}
+    .accent{stroke:#ffd88a;stroke-width:7;stroke-linecap:round}
+  </style>
+
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#ffd88a"/></marker></defs>
+  <text x="52" y="70" class="title">Book3 organizes one frame</text>
+  <rect x="70" y="145" width="230" height="150" rx="22" class="box"/><text x="185" y="205" text-anchor="middle" class="label">Resources</text><text x="185" y="245" text-anchor="middle" class="small">mesh, texture</text>
+  <rect x="390" y="145" width="260" height="150" rx="22" class="box"/><text x="520" y="205" text-anchor="middle" class="label">Frame Data</text><text x="520" y="245" text-anchor="middle" class="small">ring + outputs</text>
+  <rect x="740" y="145" width="250" height="150" rx="22" class="box"/><text x="865" y="205" text-anchor="middle" class="label">Encoders</text><text x="865" y="245" text-anchor="middle" class="small">compute passes</text>
+  <path d="M300 220H378" class="accent" marker-end="url(#arrow)"/><path d="M650 220H728" class="accent" marker-end="url(#arrow)"/>
+  <text x="520" y="390" text-anchor="middle" class="small">Stable resources + per-frame buffers + cached pipelines</text>
+
+</svg>

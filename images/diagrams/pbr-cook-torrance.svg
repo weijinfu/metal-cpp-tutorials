@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 460" role="img">
+  <rect width="1200" height="460" fill="#102a33"/>
+  <style>
+    .title{font:700 42px Georgia,serif;fill:#f3efe2}
+    .label{font:700 28px Helvetica,Arial,sans-serif;fill:#f3efe2}
+    .small{font:20px Helvetica,Arial,sans-serif;fill:#d7e3df}
+    .mono{font:22px Menlo,Consolas,monospace;fill:#ffd88a}
+    .box{fill:#173c45;stroke:#7ea9b1;stroke-width:3}
+    .light{fill:#fffaf0;stroke:#d8d0c0;stroke-width:3}
+    .gold{fill:#8d7047}
+    .blue{fill:#34718a}
+    .green{fill:#5b8f54}
+    .line{stroke:#f3efe2;stroke-width:7;stroke-linecap:round}
+    .accent{stroke:#ffd88a;stroke-width:7;stroke-linecap:round}
+  </style>
+
+  <text x="52" y="70" class="title">PBR combines material maps</text>
+  <rect x="70" y="130" width="270" height="230" rx="22" class="box"/><text x="105" y="185" class="label">Texture maps</text><text x="105" y="235" class="small">base color</text><text x="105" y="270" class="small">roughness</text><text x="105" y="305" class="small">metallic + AO</text>
+  <rect x="460" y="130" width="280" height="230" rx="22" class="box"/><text x="500" y="185" class="label">BRDF</text><text x="500" y="235" class="mono">D · G · F</text><text x="500" y="288" class="small">controls specular</text>
+  <rect x="860" y="130" width="270" height="230" rx="22" class="box"/><text x="900" y="185" class="label">Final color</text><text x="900" y="235" class="small">diffuse</text><text x="900" y="270" class="small">specular</text><text x="900" y="305" class="small">tone mapped</text>
+  <path d="M340 245H448" class="accent" marker-end="url(#arrow)"/><path d="M740 245H848" class="accent" marker-end="url(#arrow)"/><defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#ffd88a"/></marker></defs>
+
+</svg>

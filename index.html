@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Metal-cpp Tutorials</title>
+  <meta name="description" content="Metal-cpp 中文教程系列，覆盖 GPU 图像处理、离屏渲染、材质、PBR、性能优化和 compute 示例。">
+  <link rel="canonical" href="https://weijinfu.github.io/metal-cpp-tutorials/cn/">
+  <link rel="alternate" hreflang="en" href="https://weijinfu.github.io/metal-cpp-tutorials/">
+  <link rel="alternate" hreflang="x-default" href="https://weijinfu.github.io/metal-cpp-tutorials/">
+  <link rel="stylesheet" href="style/site.css">
+</head>
+<body>
+  <main class="site-shell">
+    <header class="hero">
+      <a class="language-link" href="/metal-cpp-tutorials/" hreflang="en" lang="en">English</a>
+      <p class="eyebrow">A weekend-style path into Metal-cpp</p>
+      <h1>Metal-cpp Tutorials</h1>
+      <p class="site-author">By <a href="https://weijinfu.github.io">Jinfu Wei</a> and <a href="https://chatgpt.com/codex">Codex</a></p>
+      <p class="lede">从图像处理开始理解 GPU，再进入离屏渲染、材质和性能。教程主体是网页书，`src/` 目录按每本书提供最终参考代码。</p>
+    </header>
+
+    <section class="book-grid" aria-label="Books">
+      <a class="book-card primary" href="books/MetalCppInOneWeekend.html">
+        <span class="book-kicker">Book 1</span>
+        <h2>Metal-cpp in One Weekend</h2>
+        <p>先用 compute shader 做图片处理：buffer、texture、command buffer、compute pipeline。</p>
+      </a>
+
+      <a class="book-card" href="books/MetalCppTheNextWeek.html">
+        <span class="book-kicker">Book 2</span>
+        <h2>Metal-cpp: Offscreen Tiny Renderer</h2>
+        <p>从离屏 color target 开始，逐步加入 mesh、贴图、camera 和 Lambert / Blinn-Phong / PBR。</p>
+      </a>
+
+      <a class="book-card" href="books/MetalCppTheRestOfYourLife.html">
+        <span class="book-kicker">Book 3</span>
+        <h2>Metal-cpp: Performance and Compute</h2>
+        <p>在第二册渲染质量基础上，继续学习性能优化、GPU profiling 和更多高性能 compute 例子。</p>
+      </a>
+    </section>
+
+    <section class="notes">
+      <h2>How to Use This Site</h2>
+      <p>阅读 `books/` 里的网页书；需要对照完整代码时，打开 `src/` 下对应书名的最终参考实现。</p>
+      <pre><code>cmake -S . -B build
+cmake --build build</code></pre>
+    </section>
+  </main>
+</body>
+</html>

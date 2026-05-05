@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 330" role="img" aria-labelledby="title desc">
+  <title id="title">Render pass to drawable</title>
+  <desc id="desc">A drawable texture is attached to a render pass descriptor, encoded, and presented.</desc>
+  <defs>
+    <style>
+      .bg{fill:#fffdf7}.box{fill:#f3ecdc;stroke:#1b211f;stroke-width:2}.green{fill:#d9efe6}.blue{fill:#d7e6f6}.txt{font:21px ui-monospace,Menlo,monospace;fill:#1b211f}.sub{font:15px ui-monospace,Menlo,monospace;fill:#68756f}.arrow{stroke:#0b6f5f;stroke-width:4;fill:none;marker-end:url(#arrow)}
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#0b6f5f"/></marker>
+  </defs>
+  <rect class="bg" width="960" height="330"/>
+  <rect class="box blue" x="45" y="95" width="175" height="120" rx="14"/>
+  <text class="txt" x="77" y="145">Drawable</text>
+  <text class="sub" x="72" y="176">texture()</text>
+  <rect class="box green" x="285" y="70" width="205" height="170" rx="14"/>
+  <text class="txt" x="323" y="130">Render Pass</text>
+  <text class="sub" x="320" y="163">color attachment</text>
+  <text class="sub" x="320" y="188">depth attachment</text>
+  <rect class="box" x="555" y="95" width="185" height="120" rx="14"/>
+  <text class="txt" x="580" y="145">Encoder</text>
+  <text class="sub" x="584" y="176">drawIndexed()</text>
+  <rect class="box blue" x="805" y="95" width="110" height="120" rx="14"/>
+  <text class="txt" x="830" y="145">Screen</text>
+  <text class="sub" x="822" y="176">present</text>
+  <path class="arrow" d="M220 155 H277"/>
+  <path class="arrow" d="M490 155 H547"/>
+  <path class="arrow" d="M740 155 H797"/>
+</svg>

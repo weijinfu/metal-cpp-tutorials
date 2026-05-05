@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 460" role="img">
+  <rect width="1120" height="460" fill="#102a33"/>
+  <style>
+    .title{font:700 42px Georgia,serif;fill:#f3efe2}
+    .label{font:700 28px Helvetica,Arial,sans-serif;fill:#f3efe2}
+    .small{font:20px Helvetica,Arial,sans-serif;fill:#d7e3df}
+    .mono{font:22px Menlo,Consolas,monospace;fill:#ffd88a}
+    .box{fill:#173c45;stroke:#7ea9b1;stroke-width:3}
+    .light{fill:#fffaf0;stroke:#d8d0c0;stroke-width:3}
+    .gold{fill:#8d7047}
+    .blue{fill:#34718a}
+    .green{fill:#5b8f54}
+    .line{stroke:#f3efe2;stroke-width:7;stroke-linecap:round}
+    .accent{stroke:#ffd88a;stroke-width:7;stroke-linecap:round}
+  </style>
+
+  <text x="52" y="70" class="title">Blinn-Phong adds a moving highlight</text>
+  <circle cx="270" cy="270" r="110" class="gold"/>
+  <path d="M270 270L270 105" class="line"/><path d="M270 270L440 190" class="accent"/><path d="M270 270L410 115" stroke="#b9d9ff" stroke-width="7" stroke-linecap="round"/><path d="M270 270L375 165" stroke="#f0b57b" stroke-width="7" stroke-linecap="round"/>
+  <text x="252" y="95" class="label">N</text><text x="455" y="195" class="label">L</text><text x="418" y="115" class="label">V</text><text x="382" y="165" class="label">H</text>
+  <rect x="600" y="125" width="445" height="230" rx="22" class="box"/><text x="640" y="185" class="label">Half vector</text><text x="640" y="235" class="mono">H = normalize(L + V)</text><text x="640" y="292" class="small">specular uses N dot H</text><text x="640" y="326" class="small">Changing view moves highlight</text>
+
+</svg>

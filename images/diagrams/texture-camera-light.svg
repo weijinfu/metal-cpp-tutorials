@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 380" role="img" aria-labelledby="title desc">
+  <title id="title">Texture camera and light data flow</title>
+  <desc id="desc">Camera uniforms transform vertices while texture and light data shade fragments.</desc>
+  <defs>
+    <style>
+      .bg{fill:#fffdf7}.box{fill:#f3ecdc;stroke:#1b211f;stroke-width:2}.green{fill:#d9efe6}.gold{fill:#f3e3b0}.blue{fill:#d7e6f6}.txt{font:20px ui-monospace,Menlo,monospace;fill:#1b211f}.sub{font:15px ui-monospace,Menlo,monospace;fill:#68756f}.arrow{stroke:#0b6f5f;stroke-width:4;fill:none;marker-end:url(#arrow)}
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 Z" fill="#0b6f5f"/></marker>
+  </defs>
+  <rect class="bg" width="960" height="380"/>
+  <rect class="box green" x="80" y="60" width="190" height="100" rx="14"/>
+  <text class="txt" x="126" y="110">Camera</text>
+  <text class="sub" x="116" y="137">MVP uniform</text>
+  <rect class="box gold" x="80" y="220" width="190" height="100" rx="14"/>
+  <text class="txt" x="128" y="270">Texture</text>
+  <text class="sub" x="112" y="297">uv -> sample</text>
+  <rect class="box blue" x="385" y="60" width="190" height="100" rx="14"/>
+  <text class="txt" x="430" y="110">Vertex</text>
+  <text class="sub" x="419" y="137">position output</text>
+  <rect class="box blue" x="385" y="220" width="190" height="100" rx="14"/>
+  <text class="txt" x="417" y="270">Fragment</text>
+  <text class="sub" x="415" y="297">albedo * light</text>
+  <rect class="box gold" x="690" y="140" width="190" height="100" rx="14"/>
+  <text class="txt" x="748" y="190">Light</text>
+  <text class="sub" x="716" y="217">normal dot dir</text>
+  <path class="arrow" d="M270 110 H377"/>
+  <path class="arrow" d="M270 270 H377"/>
+  <path class="arrow" d="M575 270 C650 270 650 205 682 195"/>
+  <path class="arrow" d="M690 190 C650 177 633 235 585 260"/>
+</svg>

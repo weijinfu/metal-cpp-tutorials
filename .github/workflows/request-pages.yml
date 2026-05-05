@@ -1,0 +1,16 @@
+name: Request Pages Deploy
+
+on:
+  push:
+    branches:
+      - preview/cn
+
+permissions:
+  contents: read
+
+jobs:
+  request:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Request main deployment
+        run: echo "Requesting GitHub Pages deployment from main."
