@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 460" role="img">
+  <rect width="1180" height="460" fill="#fffdf7"/>
+  <style>
+    .title{font:700 42px Georgia,serif;fill:#14201d}
+    .label{font:700 28px Helvetica,Arial,sans-serif;fill:#f3efe2}
+    .small{font:20px Helvetica,Arial,sans-serif;fill:#d7e3df}
+    .mono{font:22px Menlo,Consolas,monospace;fill:#ffd88a}
+    .box{fill:#173c45;stroke:#7ea9b1;stroke-width:3}
+    .light{fill:#fffaf0;stroke:#d8d0c0;stroke-width:3}
+    .gold{fill:#8d7047}
+    .blue{fill:#34718a}
+    .green{fill:#5b8f54}
+    .line{stroke:#f3efe2;stroke-width:7;stroke-linecap:round}
+    .accent{stroke:#ffd88a;stroke-width:7;stroke-linecap:round}
+  </style>
+
+  <text x="52" y="70" class="title">Compute and render write images differently</text>
+  <rect x="90" y="130" width="420" height="250" rx="22" class="box"/><text x="300" y="190" text-anchor="middle" class="label">Compute</text><text x="300" y="240" text-anchor="middle" class="small">kernel function</text><text x="300" y="285" text-anchor="middle" class="small">buffer or texture</text><text x="300" y="330" text-anchor="middle" class="small">no geometry stage</text>
+  <rect x="660" y="130" width="420" height="250" rx="22" class="box"/><text x="870" y="190" text-anchor="middle" class="label">Render</text><text x="870" y="240" text-anchor="middle" class="small">vertex shader</text><text x="870" y="285" text-anchor="middle" class="small">fragment shader</text><text x="870" y="330" text-anchor="middle" class="small">render pass output</text>
+
+</svg>

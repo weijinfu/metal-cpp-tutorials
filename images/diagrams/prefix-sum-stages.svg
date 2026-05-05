@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 420" role="img">
+  <rect width="1180" height="420" fill="#102a33"/>
+  <style>
+    .title{font:700 42px Georgia,serif;fill:#f3efe2}
+    .label{font:700 28px Helvetica,Arial,sans-serif;fill:#f3efe2}
+    .small{font:20px Helvetica,Arial,sans-serif;fill:#d7e3df}
+    .mono{font:22px Menlo,Consolas,monospace;fill:#ffd88a}
+    .box{fill:#173c45;stroke:#7ea9b1;stroke-width:3}
+    .light{fill:#fffaf0;stroke:#d8d0c0;stroke-width:3}
+    .gold{fill:#8d7047}
+    .blue{fill:#34718a}
+    .green{fill:#5b8f54}
+    .line{stroke:#f3efe2;stroke-width:7;stroke-linecap:round}
+    .accent{stroke:#ffd88a;stroke-width:7;stroke-linecap:round}
+  </style>
+
+  <defs><marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 0L10 5L0 10Z" fill="#ffd88a"/></marker></defs>
+  <text x="52" y="70" class="title">Prefix sum builds offsets</text>
+  <rect x="70" y="145" width="270" height="160" rx="22" class="box"/><text x="105" y="205" class="label">1. Local scan</text><text x="105" y="252" class="small">scan one block</text>
+  <rect x="455" y="145" width="270" height="160" rx="22" class="box"/><text x="490" y="205" class="label">2. Group sums</text><text x="490" y="252" class="small">scan block totals</text>
+  <rect x="840" y="145" width="270" height="160" rx="22" class="box"/><text x="875" y="205" class="label">3. Add back</text><text x="875" y="252" class="small">final offsets</text>
+  <path d="M340 225H443" class="accent" marker-end="url(#arrow)"/><path d="M725 225H828" class="accent" marker-end="url(#arrow)"/>
+
+</svg>

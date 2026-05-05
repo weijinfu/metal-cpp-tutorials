@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1140 420" role="img">
+  <rect width="1140" height="420" fill="#102a33"/>
+  <style>
+    .title{font:700 42px Georgia,serif;fill:#f3efe2}
+    .label{font:700 28px Helvetica,Arial,sans-serif;fill:#f3efe2}
+    .small{font:20px Helvetica,Arial,sans-serif;fill:#d7e3df}
+    .mono{font:22px Menlo,Consolas,monospace;fill:#ffd88a}
+    .box{fill:#173c45;stroke:#7ea9b1;stroke-width:3}
+    .light{fill:#fffaf0;stroke:#d8d0c0;stroke-width:3}
+    .gold{fill:#8d7047}
+    .blue{fill:#34718a}
+    .green{fill:#5b8f54}
+    .line{stroke:#f3efe2;stroke-width:7;stroke-linecap:round}
+    .accent{stroke:#ffd88a;stroke-width:7;stroke-linecap:round}
+  </style>
+
+  <text x="52" y="70" class="title">Frame resources avoid collisions</text>
+  <rect x="70" y="125" width="250" height="170" rx="22" class="box"/><text x="105" y="180" class="label">Frame 0</text><text x="105" y="225" class="small">render output</text><text x="105" y="260" class="small">uniform ring</text>
+  <rect x="390" y="125" width="250" height="170" rx="22" class="box"/><text x="425" y="180" class="label">Frame 1</text><text x="425" y="225" class="small">blur output</text><text x="425" y="260" class="small">uniform ring</text>
+  <rect x="725" y="125" width="350" height="190" rx="22" class="box"/>
+  <text x="765" y="180" class="label">Ring slices</text>
+  <text x="765" y="225" class="mono">camera | blur</text>
+  <text x="765" y="260" class="mono">reduce | tile</text>
+  <text x="765" y="295" class="small">aligned offsets</text>
+
+</svg>

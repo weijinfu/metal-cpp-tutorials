@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 520" role="img">
+  <rect width="1000" height="520" fill="#fffdf7"/>
+  <style>
+    .title{font:700 42px Georgia,serif;fill:#14201d}
+    .label{font:700 28px Helvetica,Arial,sans-serif;fill:#f3efe2}
+    .small{font:20px Helvetica,Arial,sans-serif;fill:#4f625c}
+    .mono{font:22px Menlo,Consolas,monospace;fill:#ffd88a}
+    .box{fill:#173c45;stroke:#7ea9b1;stroke-width:3}
+    .light{fill:#fffaf0;stroke:#d8d0c0;stroke-width:3}
+    .gold{fill:#8d7047}
+    .blue{fill:#34718a}
+    .green{fill:#5b8f54}
+    .line{stroke:#f3efe2;stroke-width:7;stroke-linecap:round}
+    .accent{stroke:#ffd88a;stroke-width:7;stroke-linecap:round}
+  </style>
+
+  <text x="52" y="70" class="title">Image = rows of pixels</text>
+  <g transform="translate(170 130)">
+    <rect x="0" y="0" width="620" height="260" rx="18" class="light"/>
+    <path d="M0 0V260" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M88.5 0V260" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M177 0V260" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M265.5 0V260" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M354 0V260" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M442.5 0V260" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M531 0V260" stroke="#d8d0c0" stroke-width="2"/>
+    <path d="M0 0H620" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M0 65H620" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M0 130H620" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M0 195H620" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M0 260H620" stroke="#d8d0c0" stroke-width="2"/>
+    <rect x="265" y="98" width="90" height="64" rx="10" fill="#0b6f5f"/>
+    <text x="310" y="138" text-anchor="middle" class="label">RGB</text>
+    <text x="310" y="212" text-anchor="middle" class="mono">(x, y)</text>
+  </g>
+  <text x="170" y="445" class="small">Write pixels row by row. Each pixel stores red, green, and blue bytes.</text>
+
+</svg>

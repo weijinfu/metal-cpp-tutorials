@@ -1,0 +1,48 @@
+<!doctype html>
+
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1" name="viewport"/>
+<title>Metal-cpp Tutorials</title>
+<meta content="A practical Metal-cpp tutorial series covering GPU image processing, offscreen rendering, materials, PBR, performance, and compute examples." name="description"/>
+<link href="https://weijinfu.github.io/metal-cpp-tutorials/" rel="canonical"/>
+<link href="https://weijinfu.github.io/metal-cpp-tutorials/" hreflang="en" rel="alternate"/>
+<link href="https://weijinfu.github.io/metal-cpp-tutorials/" hreflang="x-default" rel="alternate"/>
+<link href="style/site.css" rel="stylesheet"/>
+</head>
+<body>
+<main class="site-shell">
+<header class="hero">
+<a class="language-link" href="/metal-cpp-tutorials/cn/" hreflang="zh-CN" lang="zh-CN">中文版</a>
+<p class="eyebrow">A weekend-style path into Metal-cpp</p>
+<h1>Metal-cpp Tutorials</h1>
+<p class="site-author">By <a href="https://weijinfu.github.io">Jinfu Wei</a> and <a href="https://chatgpt.com/codex">Codex</a></p>
+<p class="lede">Understanding GPUs starts with image processing and moves on to off-screen rendering, materials, and performance. The tutorial body is a web book, and the `src/` directory provides the final reference code for each book.</p>
+</header>
+<section aria-label="Books" class="book-grid">
+<a class="book-card primary" href="books/MetalCppInOneWeekend.html">
+<span class="book-kicker">Book 1</span>
+<h2>Metal-cpp in One Weekend</h2>
+<p>First use a compute shader for image processing: buffer, texture, command buffer, compute pipeline.</p>
+</a>
+<a class="book-card" href="books/MetalCppTheNextWeek.html">
+<span class="book-kicker">Book 2</span>
+<h2>Metal-cpp: Offscreen Tiny Renderer</h2>
+<p>Start with the off-screen color target and gradually add mesh, texture, camera and Lambert / Blinn-Phong / PBR.</p>
+</a>
+<a class="book-card" href="books/MetalCppTheRestOfYourLife.html">
+<span class="book-kicker">Book 3</span>
+<h2>Metal-cpp: Performance and Compute</h2>
+<p>Building on the rendering quality of Book 2, continue learning about performance optimization, GPU profiling, and more high-performance compute examples.</p>
+</a>
+</section>
+<section class="notes">
+<h2>How to Use This Site</h2>
+<p>Read the web book in `books/`; when you need to compare the complete code, open the final reference implementation of the corresponding book under `src/`.</p>
+<pre><code>cmake -S . -B build
+cmake --build build</code></pre>
+</section>
+</main>
+</body>
+</html>

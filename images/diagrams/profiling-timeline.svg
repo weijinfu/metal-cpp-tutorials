@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 940 440" role="img">
+  <rect width="940" height="440" fill="#102a33"/>
+  <style>
+    .title{font:700 42px Georgia,serif;fill:#f3efe2}
+    .label{font:700 28px Helvetica,Arial,sans-serif;fill:#f3efe2}
+    .small{font:20px Helvetica,Arial,sans-serif;fill:#d7e3df}
+    .mono{font:22px Menlo,Consolas,monospace;fill:#ffd88a}
+    .box{fill:#173c45;stroke:#7ea9b1;stroke-width:3}
+    .light{fill:#fffaf0;stroke:#d8d0c0;stroke-width:3}
+    .gold{fill:#8d7047}
+    .blue{fill:#34718a}
+    .green{fill:#5b8f54}
+    .line{stroke:#f3efe2;stroke-width:7;stroke-linecap:round}
+    .accent{stroke:#ffd88a;stroke-width:7;stroke-linecap:round}
+  </style>
+
+  <text x="52" y="70" class="title">Measure before optimizing</text>
+  <text x="90" y="160" class="label">CPU</text><text x="90" y="260" class="label">GPU</text>
+  <rect x="190" y="130" width="300" height="42" rx="14" class="blue"/><rect x="505" y="130" width="190" height="42" rx="14" fill="#8b5f35"/>
+  <rect x="300" y="230" width="420" height="42" rx="14" class="green"/>
+  <text x="340" y="158" text-anchor="middle" class="small">encode / upload</text><text x="600" y="158" text-anchor="middle" class="small">wait</text><text x="510" y="258" text-anchor="middle" class="small">GPU command buffer</text>
+  <path d="M190 330H820" stroke="#d8c08c" stroke-width="5"/><path d="M190 322V338" stroke="#d8c08c" stroke-width="5"/><path d="M505 322V338" stroke="#d8c08c" stroke-width="5"/><path d="M720 322V338" stroke="#d8c08c" stroke-width="5"/>
+  <text x="178" y="370" class="small">submit</text><text x="488" y="370" class="small">commit</text><text x="690" y="370" class="small">complete</text>
+
+</svg>

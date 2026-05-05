@@ -1,0 +1,74 @@
+name: Deploy GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+  workflow_run:
+    workflows:
+      - Request Pages Deploy
+    types:
+      - completed
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  deploy:
+    if: github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'preview/cn')
+    runs-on: ubuntu-latest
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout English site
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: english
+
+      - name: Checkout Chinese site
+        uses: actions/checkout@v4
+        with:
+          ref: preview/cn
+          path: chinese
+
+      - name: Compose Pages artifact
+        run: |
+          mkdir -p public
+          rsync -a --delete \
+            --exclude ".git" \
+            --exclude ".github" \
+            --exclude "build" \
+            --exclude "Plan.md" \
+            english/ public/
+
+          mkdir -p public/cn
+          rsync -a --delete \
+            --exclude ".git" \
+            --exclude ".github" \
+            --exclude "build" \
+            --exclude "Plan.md" \
+            chinese/ public/cn/
+
+      - name: Disable Jekyll
+        run: touch public/.nojekyll
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

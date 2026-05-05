@@ -1,0 +1,145 @@
+:root {
+  color-scheme: light;
+  --ink: #14201d;
+  --muted: #60716b;
+  --paper: #f7f3e8;
+  --panel: #fffdf5;
+  --line: #d9d0bd;
+  --accent: #0b6f5f;
+  --accent-2: #b6462f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: linear-gradient(135deg, #f7f3e8 0%, #e9f1eb 55%, #f5e8d7 100%);
+  color: var(--ink);
+  font-family: Georgia, "Times New Roman", serif;
+}
+
+.site-shell {
+  width: min(1120px, calc(100% - 40px));
+  margin: 0 auto;
+  padding: 72px 0;
+}
+
+.hero {
+  max-width: 780px;
+}
+
+.language-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  margin-bottom: 26px;
+  padding: 0 16px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  color: var(--accent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9rem;
+  text-decoration: none;
+}
+
+.language-link:hover {
+  background: rgba(11, 111, 95, 0.1);
+}
+
+.eyebrow,
+.book-kicker {
+  color: var(--accent-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+h1 {
+  margin: 12px 0 18px;
+  font-size: clamp(3rem, 8vw, 6.5rem);
+  line-height: 0.95;
+  letter-spacing: 0;
+}
+
+.lede {
+  max-width: 660px;
+  color: var(--muted);
+  font-size: 1.25rem;
+  line-height: 1.65;
+}
+
+.site-author {
+  margin: -4px 0 18px;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.95rem;
+}
+
+.site-author a {
+  color: var(--accent);
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.18em;
+}
+
+.book-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 18px;
+  margin-top: 52px;
+}
+
+.book-card {
+  display: block;
+  min-height: 280px;
+  padding: 28px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 253, 245, 0.82);
+  color: inherit;
+  text-decoration: none;
+}
+
+.book-card.primary {
+  background: #fffdf5;
+  border-color: var(--accent);
+}
+
+.book-card h2 {
+  margin: 16px 0 18px;
+  font-size: 2rem;
+  line-height: 1.08;
+}
+
+.book-card p,
+.notes p {
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.notes {
+  margin-top: 44px;
+  padding-top: 32px;
+  border-top: 1px solid var(--line);
+}
+
+pre {
+  overflow-x: auto;
+  padding: 18px;
+  border-radius: 8px;
+  background: #14201d;
+  color: #f8f0db;
+}
+
+@media (max-width: 820px) {
+  .book-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .site-shell {
+    width: min(100% - 28px, 720px);
+    padding: 44px 0;
+  }
+}

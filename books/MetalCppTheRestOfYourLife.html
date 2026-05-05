@@ -1,0 +1,395 @@
+<!doctype html>
+
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1" name="viewport"/>
+<title>Metal-cpp: Performance and Compute</title>
+<link href="../style/book.css" rel="stylesheet"/>
+<script defer="" src="../style/syntax-highlight.js"></script>
+</head>
+<body>
+<main class="book">
+<nav class="book-nav"><a href="../index.html">Back to books</a></nav>
+<h1 id="metal-cpp-performance-and-compute">Metal-cpp: Performance and Compute</h1>
+<p class="book-author">By <a href="https://weijinfu.github.io">Jinfu Wei</a> and <a href="https://chatgpt.com/codex">Codex</a></p>
+<p>Book 2 sets up the main path of rendering quality: mesh, texture, camera, Lambert, Blinn-Phong, and PBR. Book 3 does not continue to add GUI, nor does it continue to add basic image quality functions, but organizes Metal as a "measurable and scalable compute platform". The goal is to turn the same set of inputs into a stable off-screen baseline, and then gradually introduce profiling, frame resources, uniform ring buffer, and common GPU workloads such as reduction, prefix sum, blur, particle, and tile binning.</p>
+<figure><img alt="Engine modules and frame resources" src="../images/diagrams/engine-frame-graph.svg"/><figcaption>The focus of Book 3 is not to "draw a new scene", but to organize the data, buffers, dispatches, and measurement methods into a structure more like a real project.</figcaption></figure>
+<p>The current reference code for Book 3 actually produces these outputs:</p>
+<ul>
+<li><code>build/MetalCppRenderingEngine/engine-reference.ppm</code></li>
+<li><code>build/MetalCppRenderingEngine/engine-blur.ppm</code></li>
+<li><code>build/MetalCppRenderingEngine/engine-particles.ppm</code></li>
+<li><code>build/MetalCppRenderingEngine/engine-tile-heatmap.ppm</code></li>
+<li><code>build/MetalCppRenderingEngine/engine-metrics.txt</code></li>
+</ul>
+<h2 id="scope">Scope</h2>
+<p>Book 2 is responsible for improving the rendering results step by step, and Book 3 is responsible for organizing the same type of program to be more stable, easier to measure, and easier to expand to larger compute workloads. There will no longer be a focus on windows, UI, or more material features, but rather on buffering, dispatch, synchronization, and profiling.</p>
+<h2 id="overview">Overview</h2>
+<p>Book 3 still uses off-screen output because this type of program is more suitable for performance experiments: fixed input, fixed output, no window events and UI life cycle interference. You can schedule multiple compute passes in the same frame and check the resulting graph and timing at the same time.</p>
+<p>The following paragraph is the command to be executed at the current stage, not the content written into a source file. First use it to confirm that the Book 3 target can be built and run independently.</p>
+<figure class="code-block"><figcaption class="code-title"><span>terminal</span></figcaption><pre><code class="language-sh">cmake -S . -B build
+cmake --build build --target MetalCppRenderingEngine
+./build/MetalCppRenderingEngine/MetalCppRenderingEngine</code></pre></figure>
+<h2 id="project-layout">Project Layout</h2>
+<p>The reference code in Book 3 is still deliberately kept into two files: a C++ scheduler and a Metal shaders file. In this way, the new workload in each chapter can clearly fall on the two lines of "how the CPU side organizes the buffer and command buffer" and "how the GPU side kernel reads these data."</p>
+<p>The following paragraph is not to be copied to a source code file, but the current directory division of Book 3.</p>
+<figure class="code-block"><figcaption class="code-title"><span>project layout</span></figcaption><pre><code class="language-text">main.cpp        # pipelines, frame resources, ring buffer, metrics, output files
+Shaders.metal   # reference render, blur, reduction, prefix sum, particles, tile binning</code></pre></figure>
+<h2 id="reference-renderer">Reference Renderer</h2>
+<p>Keep a minimal reference renderer first. It is not to pursue complex graphics, but to provide a stable baseline for subsequent optimization and compute pass. The current reference implementation still uses a small quad, a fixed checker map, and a stable set of camera/light parameters.</p>
+<p>Open <code>main.cpp</code> and first add the basic input structure and static scene data of Book 3. This step is to initialize the new file, not to modify the functions in the old chapter.</p>
+<figure class="code-block"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">New Camera / Vertex / Triangle</span></figcaption><pre><code class="language-cpp">struct Vertex
+{
+    Float4 position;
+    Float4 normal;
+    Float4 uv;
+};
+
+struct Triangle
+{
+    uint32_t a;
+    uint32_t b;
+    uint32_t c;
+    uint32_t _pad;
+};
+
+struct Camera
+{
+    Float4 origin;
+    Float4 lowerLeft;
+    Float4 horizontal;
+    Float4 vertical;
+    Float4 lightDirection;
+    uint32_t width;
+    uint32_t height;
+    uint32_t textureWidth;
+    uint32_t textureHeight;
+    uint32_t triangleCount;
+    uint32_t _pad[3];
+};</code></pre></figure>
+<p>The corresponding reference render kernel is written in <code>Shaders.metal</code>. It emits a ray to each pixel, intersects the two triangles, then samples the checker map based on the hit's UV and performs minimum Lambert diffuse reflection.</p>
+<figure class="code-block"><figcaption class="code-title"><span>Shaders.metal</span><span class="code-note">New render_mesh</span></figcaption><pre><code class="language-cpp">kernel void render_mesh(device const Vertex* vertices [[buffer(0)]],
+                        device const Triangle* triangles [[buffer(1)]],
+                        device const uchar4* texturePixels [[buffer(2)]],
+                        constant Camera&amp; camera [[buffer(3)]],
+                        device uchar4* output [[buffer(4)]],
+                        uint2 id [[thread_position_in_grid]])</code></pre></figure>
+<figure><img alt="Book 3 reference render" src="../images/results/MetalCppRenderingEngine/05-engine-reference.png"/><figcaption>Reference render for Book 3. It is not complex in itself, but it provides a fixed input and fixed output, suitable as a baseline for subsequent blur, reduction and timing.</figcaption></figure>
+<h2 id="profiling-first">Profiling First</h2>
+<p>Measure before optimizing. Book 3 first divides one frame into three time periods:</p>
+<ul>
+<li>CPU encode time: the time it takes for the CPU to create the encoder, bind the buffer, and schedule dispatch.</li>
+<li>CPU wait time: <code>waitUntilCompleted()</code> Let the CPU stop and wait for the GPU.</li>
+<li>GPU time: Command buffer GPU execution time provided by Metal</li>
+</ul>
+<figure><img alt="CPU and GPU profiling timeline" src="../images/diagrams/profiling-timeline.svg"/><figcaption>If you only look at the total time, it is easy to not know whether the bottleneck is in CPU encode, GPU execution, or the CPU itself is waiting.</figcaption></figure>
+<p>Add timing records in <code>main.cpp</code>. The following paragraph is connected near the command buffer encoding and submission, and is used to replace the old writing method of "only commit without measurement".</p>
+<figure class="code-block is-modified"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">Modify the command buffer submission location, green = new</span></figcaption><pre><code class="language-cpp"><span class="code-line line-add">const auto cpuFrameStart = std::chrono::high_resolution_clock::now();</span>
+<span class="code-line">MTL::CommandBuffer* commandBuffer = queue-&gt;commandBuffer();</span>
+<span class="code-line line-add">const auto cpuEncodeEnd = std::chrono::high_resolution_clock::now();</span>
+<span class="code-line">commandBuffer-&gt;commit();</span>
+<span class="code-line line-add">const auto cpuWaitStart = std::chrono::high_resolution_clock::now();</span>
+<span class="code-line">commandBuffer-&gt;waitUntilCompleted();</span>
+<span class="code-line line-add">const auto cpuFrameEnd = std::chrono::high_resolution_clock::now();</span>
+<span class="code-line line-add">metrics.gpuMs = (commandBuffer-&gt;GPUEndTime() - commandBuffer-&gt;GPUStartTime()) * 1000.0;</span></code></pre></figure>
+<p>After running the current reference implementation, <code>engine-metrics.txt</code> will write out a set of real values. You can already see in the current output that "CPU encode is almost not a problem, the main time is waiting for the GPU to complete":</p>
+<figure class="code-block"><figcaption class="code-title"><span>engine-metrics.txt</span></figcaption><pre><code class="language-text">cpu_encode_ms: 0.035
+cpu_wait_ms: 3.408
+cpu_frame_ms: 3.449
+gpu_frame_ms: 0.482
+gpu_kernel_ms: 2.596
+average_luminance: 0.207</code></pre></figure>
+<h2 id="cpu-gpu-synchronization">CPU/GPU Synchronization</h2>
+<p>Book 3 begins to explicitly distinguish between "when the CPU can continue to write data" and "when the GPU has finished reading the previous round of data." The current reference code still ends with <code>waitUntilCompleted()</code> because it is most suitable for teaching: you can read back the result image and metrics stably, and clearly see that the waiting time has been measured individually.</p>
+<p>In the frame loop of <code>main.cpp</code>, first clean and fill the shared buffer to be written in this frame, then submit the command buffer, and finally wait uniformly. This section is to continue modifying the existing main loop, not to add an independent function.</p>
+<figure class="code-block is-modified"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">Modify the frame loop to synchronize CPU writing and GPU reading</span></figcaption><pre><code class="language-cpp"><span class="code-line">FrameResources&amp; frame = frames[frameIndex % kFrameCount];</span>
+<span class="code-line line-add">frame.ringHead = 0;</span>
+<span class="code-line line-add">std::memcpy(frame.prefixInput-&gt;contents(), prefixFlags.data(), prefixFlags.size() * sizeof(uint32_t));</span>
+<span class="code-line line-add">std::memcpy(frame.particleA-&gt;contents(), particles.data(), particles.size() * sizeof(Particle));</span>
+<span class="code-line line-add">clearBuffer(frame.renderOutput, pixelCount * 4);</span>
+<span class="code-line line-add">clearBuffer(frame.blurOutput, pixelCount * 4);</span>
+<span class="code-line line-add">clearBuffer(frame.partialSums, partialCount * sizeof(float));</span>
+<span class="code-line">commandBuffer-&gt;commit();</span>
+<span class="code-line">commandBuffer-&gt;waitUntilCompleted();</span></code></pre></figure>
+<p>If Book 3 is expanded into a true multi-frame in-flight program in the future, the idea in this section remains the same, except that "wait for each frame" is changed to "only wait when readback or the ring buffer is about to be overwritten".</p>
+<h2 id="frame-resources">Frame Resources</h2>
+<p>Book 2 can directly finish writing in a shared buffer and wait for the GPU to finish reading. Book 3 should begin to explicitly distinguish "which resources can be reused for a long time and which resources belong to the temporary results of a certain frame."</p>
+<figure><img alt="Frame resources and ring buffer layout" src="../images/diagrams/frame-resources-ring-buffer.svg"/><figcaption>Each frame has its own output buffer and its own uniform ring, so that when the CPU updates the next frame of data, it will not step on what the GPU is still reading.</figcaption></figure>
+<p>Add <code>FrameResources</code> to <code>main.cpp</code>. This is a new structure that can be added directly to the auxiliary structure definition area.</p>
+<figure class="code-block"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">Add FrameResources</span></figcaption><pre><code class="language-cpp">struct FrameResources
+{
+    MTL::Buffer* uniformRing = nullptr;
+    MTL::Buffer* renderOutput = nullptr;
+    MTL::Buffer* blurOutput = nullptr;
+    MTL::Buffer* particlePreview = nullptr;
+    MTL::Buffer* partialSums = nullptr;
+    MTL::Buffer* prefixInput = nullptr;
+    MTL::Buffer* prefixOutput = nullptr;
+    MTL::Buffer* tileCounts = nullptr;
+    MTL::Buffer* particleA = nullptr;
+    MTL::Buffer* particleB = nullptr;
+    uint32_t ringHead = 0;
+};</code></pre></figure>
+<p>Then rotate them by frame index in the main loop. Although this is ultimately an off-screen program, you can still organize the resources into shapes that will be used by the real rendering cycle.</p>
+<figure class="code-block"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">New frame rotation</span></figcaption><pre><code class="language-cpp">std::array&lt;FrameResources, kFrameCount&gt; frames{};
+
+for (uint32_t frameIndex = 0; frameIndex &lt; kFrameCount; ++frameIndex)
+{
+    FrameResources&amp; frame = frames[frameIndex % kFrameCount];
+    frame.ringHead = 0;
+    clearBuffer(frame.renderOutput, pixelCount * 4);
+    clearBuffer(frame.blurOutput, pixelCount * 4);
+    clearBuffer(frame.tileCounts, tileCount * sizeof(uint32_t));
+}</code></pre></figure>
+<h2 id="uniform-ring-buffer">Uniform Ring Buffer</h2>
+<p>The program in Book 3 will arrange multiple different compute passes in one frame: render, blur, reduction, prefix sum, particle, and tile binning. Don't create a new small buffer for each pass. A more reliable approach is to have a large shared buffer, which is sliced ​​by 256 bytes, and each pass is bound to a different offset.</p>
+<p>First add ring allocator in <code>main.cpp</code>. This is a new helper function that can be placed near the resource creation function.</p>
+<figure class="code-block"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">New allocateRing</span></figcaption><pre><code class="language-cpp">RingSlice allocateRing(FrameResources&amp; frame, uint32_t bytes)
+{
+    const uint32_t alignedBytes = align256(bytes);
+    RingSlice slice;
+    slice.offset = frame.ringHead;
+    slice.cpuPointer = static_cast&lt;uint8_t*&gt;(frame.uniformRing-&gt;contents()) + frame.ringHead;
+    frame.ringHead += alignedBytes;
+    return slice;
+}</code></pre></figure>
+<p>Then write the parameters of each pass to different slices, and then bind the same <code>uniformRing</code> to the encoder with different offsets.</p>
+<figure class="code-block"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">Add different uniform slices</span></figcaption><pre><code class="language-cpp">const RingSlice cameraSlice = allocateRing(frame, sizeof(Camera));
+std::memcpy(cameraSlice.cpuPointer, &amp;camera, sizeof(Camera));
+
+const RingSlice imageSlice = allocateRing(frame, sizeof(ImageParams));
+std::memcpy(imageSlice.cpuPointer, &amp;imageParams, sizeof(ImageParams));
+
+encoder-&gt;setBuffer(frame.uniformRing, cameraSlice.offset, 3);
+encoder-&gt;setBuffer(frame.uniformRing, imageSlice.offset, 2);</code></pre></figure>
+<h2 id="data-layout">Data Layout</h2>
+<p>For the first time in Book 3, you need to carefully look at the data layout. The current particle system uses AoS, that is, each particle puts <code>position</code> and <code>velocity</code> together. Because <code>particle_step</code> in this book will read and write back these two fields at the same time every time, this layout is more intuitive and more suitable for novices to run through the ping-pong update first.</p>
+<p>Keep the same <code>Particle</code> structure in both <code>main.cpp</code> and <code>Shaders.metal</code>. This is a new structure definition, not just adding a few lines to the old function.</p>
+<figure class="code-block"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">New Particle (AoS)</span></figcaption><pre><code class="language-cpp">struct Particle
+{
+    Float2 position;
+    Float2 velocity;
+};</code></pre></figure>
+<p>After you run through this version, you can try to split it into SoA, such as separate <code>positionX[]</code>, <code>positionY[]</code>, <code>velocityX[]</code>, <code>velocityY[]</code>. The current version of the tutorial does not force the switch to SoA because the focus of Book 3 is to let you see "the layout affects subsequent optimization space" rather than introducing two sets of particle implementations at once.</p>
+<h2 id="pipeline-cache">Pipeline and Resource Cache</h2>
+<p>Book 3 should not re-create the pipeline in every frame. The current reference code creates all compute pipelines in a unified manner during the startup phase, and then reuses the entire frame. This is the minimal pipeline cache in this book.</p>
+<p>Added <code>Pipelines</code> structure and helper functions in <code>main.cpp</code>. This is new startup code that can be added directly near the resource creation helper function.</p>
+<figure class="code-block"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">New Pipelines cache</span></figcaption><pre><code class="language-cpp">struct Pipelines
+{
+    MTL::ComputePipelineState* render = nullptr;
+    MTL::ComputePipelineState* blur = nullptr;
+    MTL::ComputePipelineState* reduction = nullptr;
+    MTL::ComputePipelineState* prefix = nullptr;
+    MTL::ComputePipelineState* particleStep = nullptr;
+    MTL::ComputePipelineState* particleRaster = nullptr;
+    MTL::ComputePipelineState* tile = nullptr;
+};</code></pre></figure>
+<figure class="code-block"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">Add makePipelines / releasePipelines</span></figcaption><pre><code class="language-cpp">Pipelines pipelines = makePipelines(device, library);
+if (!pipelinesReady(pipelines))
+{
+    releasePipelines(pipelines);
+    return 1;
+}</code></pre></figure>
+<p>In this tutorial, we first understand "cache" as "create once and reuse". If we continue to expand Book 3 in the future, we will put the cache strategies of texture, sampler, and argument buffer into the same routine.</p>
+<h2 id="threadgroup-shape">Threadgroup Shape</h2>
+<p>Different kernels should not blindly share the same threadgroup shape. 2D image passes are more suitable for 2D tiles; particle updates and tile binning are more suitable for 1D batches; reduction needs to match the threadgroup size and shared scratch array.</p>
+<p>In <code>main.cpp</code>, convert hardcoded threadgroup size into constants and small helper functions. The following paragraph is a supplement to the existing constant area and auxiliary function area.</p>
+<figure class="code-block"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">New threadgroup helpers</span></figcaption><pre><code class="language-cpp">constexpr uint32_t kThreadgroup1D = 256;
+constexpr uint32_t kImageThreadsX = 16;
+constexpr uint32_t kImageThreadsY = 8;
+constexpr uint32_t kParticleThreads = 64;
+
+MTL::Size makeImageThreadgroup()
+{
+    return MTL::Size::Make(kImageThreadsX, kImageThreadsY, 1);
+}
+
+MTL::Size makeLinearThreadgroup(uint32_t width)
+{
+    return MTL::Size::Make(width, 1, 1);
+}</code></pre></figure>
+<p>Then change the dispatch call to a semantic helper instead of writing bare numbers everywhere:</p>
+<figure class="code-block is-modified"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">Modify dispatchThreads, yellow = old value is replaced</span></figcaption><pre><code class="language-cpp"><span class="code-line">encoder-&gt;dispatchThreads(MTL::Size::Make(kWidth, kHeight, 1),</span>
+<span class="code-line line-mark">                         makeImageThreadgroup());</span>
+
+<span class="code-line">encoder-&gt;dispatchThreads(MTL::Size::Make(kParticleCount, 1, 1),</span>
+<span class="code-line line-mark">                         makeLinearThreadgroup(kParticleThreads));</span></code></pre></figure>
+<h2 id="command-encoding">Command Encoding Strategy</h2>
+<p>Book 3's command buffer no longer only contains one kernel. The current reference implementation will encode these tasks sequentially in one frame:</p>
+<figure class="code-block"><figcaption class="code-title"><span>dispatch order</span></figcaption><pre><code class="language-text">1. render_mesh
+2. reduce_luminance
+3. blur_image
+4. prefix_sum_16
+5. particle_step (ping-pong for 24 steps)
+6. rasterize_particles
+7. tile_bin_particles</code></pre></figure>
+<p>The goal of this sequence is not to "maximize performance", but to stuff different types of compute workloads into the same command buffer, so that you can view timing, result images, and indicator files at the same time.</p>
+<h2 id="parallel-reduction">Parallel Reduction</h2>
+<p>Reduction is the first true "performance compute kernel" in Book 3. It compresses the brightness of the entire reference image into a set of partial sums, and then the CPU performs the final sum of these partial sums. In this way, we can first understand the reduction within the threadgroup, and then consider the more complex pure GPU multi-stage reduction.</p>
+<p>Add <code>reduce_luminance</code> to <code>Shaders.metal</code>. This is the new kernel and does not replace <code>render_mesh</code>.</p>
+<figure class="code-block"><figcaption class="code-title"><span>Shaders.metal</span><span class="code-note">New reduce_luminance</span></figcaption><pre><code class="language-cpp">threadgroup float scratch[256];
+
+float value = 0.0;
+if (gid &lt; params.pixelCount)
+{
+    const uchar4 pixel = input[gid];
+    const float3 rgb = float3(pixel.r, pixel.g, pixel.b) / 255.0;
+    value = dot(rgb, float3(0.2126, 0.7152, 0.0722));
+}
+scratch[tid] = value;
+threadgroup_barrier(mem_flags::mem_threadgroup);
+
+for (uint stride = 128; stride &gt; 0; stride &gt;&gt;= 1)
+{
+    if (tid &lt; stride)
+    {
+        scratch[tid] += scratch[tid + stride];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+}</code></pre></figure>
+<p>The CPU side finally only needs to add partial sums once to get the average brightness:</p>
+<figure class="code-block"><figcaption class="code-title"><span>main.cpp</span><span class="code-note">Add average luminance summary</span></figcaption><pre><code class="language-cpp">const float* partialSums = static_cast&lt;const float*&gt;(frame.partialSums-&gt;contents());
+double luminanceSum = 0.0;
+for (uint32_t i = 0; i &lt; partialCount; ++i)
+{
+    luminanceSum += partialSums[i];
+}
+metrics.averageLuminance = luminanceSum / static_cast&lt;double&gt;(pixelCount);</code></pre></figure>
+<h2 id="prefix-sum">Prefix Sum</h2>
+<p>Prefix sum is one step more than reduction: instead of compressing all the data into one value, it writes "how many valid elements are in front" as its own offset at each position. Book 3 first uses a small example of 16 elements to run through the outline of the algorithm.</p>
+<figure><img alt="Prefix sum stages" src="../images/diagrams/prefix-sum-stages.svg"/><figcaption>First perform a local scan within the threadgroup, and then expand to a larger multi-group version. This book first explains the block-local version clearly.</figcaption></figure>
+<p>Add <code>prefix_sum_16</code> to <code>Shaders.metal</code>. It does a simple version of Hillis-Steele scan using the threadgroup scratch array.</p>
+<figure class="code-block"><figcaption class="code-title"><span>Shaders.metal</span><span class="code-note">New prefix_sum_16</span></figcaption><pre><code class="language-cpp">threadgroup uint scratch[16];
+scratch[tid] = input[tid];
+threadgroup_barrier(mem_flags::mem_threadgroup);
+
+for (uint offset = 1; offset &lt; params.count; offset &lt;&lt;= 1)
+{
+    uint value = scratch[tid];
+    if (tid &gt;= offset)
+    {
+        value += scratch[tid - offset];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    scratch[tid] = value;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+output[tid] = (tid == 0) ? 0 : scratch[tid - 1];</code></pre></figure>
+<p>The current reference program will write a fixed flag array and its corresponding prefix output into <code>engine-metrics.txt</code> to facilitate checking whether the algorithm is correct:</p>
+<figure class="code-block"><figcaption class="code-title"><span>engine-metrics.txt</span></figcaption><pre><code class="language-text">prefix_input:  1 0 1 1 0 1 0 1 1 0 0 1 1 1 0 1
+prefix_output: 0 1 1 2 3 3 4 4 5 6 6 6 7 8 9 9</code></pre></figure>
+<h2 id="image-convolution">Image Convolution</h2>
+<p>Book 1 has been blurred. Book 3 puts it back on the performance route. The purpose is not to teach convolution again, but to make blur a "second stable workload": it will read the neighborhood and access the image buffer in large quantities. It is also very suitable for continuing to try threadgroup memory optimization in the future.</p>
+<p>Add <code>blur_image</code> to <code>Shaders.metal</code>. This is a new kernel and does not replace the implementation of Book 1.</p>
+<figure class="code-block"><figcaption class="code-title"><span>Shaders.metal</span><span class="code-note">New blur_image</span></figcaption><pre><code class="language-cpp">const int weights[3][3] = {
+    {1, 2, 1},
+    {2, 4, 2},
+    {1, 2, 1},
+};
+
+for (int offsetY = -1; offsetY &lt;= 1; ++offsetY)
+{
+    for (int offsetX = -1; offsetX &lt;= 1; ++offsetX)
+    {
+        const uint sampleX = uint(clamp(int(id.x) + offsetX, 0, int(params.width) - 1));
+        const uint sampleY = uint(clamp(int(id.y) + offsetY, 0, int(params.height) - 1));
+        const uchar4 sample = source[sampleY * params.width + sampleX];
+        accum += float3(sample.r, sample.g, sample.b) * weight;
+    }
+}</code></pre></figure>
+<figure><img alt="Blurred reference render" src="../images/results/MetalCppRenderingEngine/06-engine-blur.png"/><figcaption>The result of the same reference image after 3x3 Gaussian blur. It serves as the second stable output image of Book 3 and is used to verify the convolutional kernel.</figcaption></figure>
+<h2 id="particle-simulation">Particle Simulation</h2>
+<p>The particle system is an example of "compute update -&gt; compute visualization" in Book 3. The current reference implementation does not introduce the render pipeline, but continues to adhere to pure compute: first update the particle position, and then use another kernel to directly draw the particles into the off-screen image buffer.</p>
+<p>First add <code>particle_step</code> to <code>Shaders.metal</code>. It reads the current particle array and writes to the next particle array, achieving minimal ping-pong updates.</p>
+<figure class="code-block"><figcaption class="code-title"><span>Shaders.metal</span><span class="code-note">New particle_step</span></figcaption><pre><code class="language-cpp">kernel void particle_step(device const Particle* currentParticles [[buffer(0)]],
+                          device Particle* nextParticles [[buffer(1)]],
+                          constant ParticleParams&amp; params [[buffer(2)]],
+                          uint id [[thread_position_in_grid]])
+{
+    Particle particle = currentParticles[id];
+    particle.position += particle.velocity * params.dt;
+    if (particle.position.x &lt; 0.05 || particle.position.x &gt; 0.95)
+    {
+        particle.velocity.x *= -1.0;
+    }
+    if (particle.position.y &lt; 0.08 || particle.position.y &gt; 0.92)
+    {
+        particle.velocity.y *= -1.0;
+    }
+    nextParticles[id] = particle;
+}</code></pre></figure>
+<p>Then add <code>rasterize_particles</code> to convert the particle array into a visible image. The current implementation allows each pixel to traverse all particles and superimpose glow. The key point is that the result is stable and facilitates subsequent observation of the effect of tile binning.</p>
+<figure><img alt="Particle preview generated by compute" src="../images/results/MetalCppRenderingEngine/07-engine-particles.png"/><figcaption>Book 3 particle preview. It shows how another compute pass directly consumes the same batch of particle data after the compute is updated.</figcaption></figure>
+<h2 id="tile-culling">Tile-Based Culling</h2>
+<p>The core idea of ​​Tile culling is to "allocate objects into small blocks first, and then let subsequent stages only look at their own small block." Book 3 does not do complete tile lighting, but uses particle examples to create a runnable tile binning: each particle adds one atomically to the counter of that tile based on which tile it falls on.</p>
+<figure><img alt="Tile binning overview" src="../images/diagrams/tile-culling-grid.svg"/><figcaption>Tile binning first compresses "who may affect this area", so that subsequent passes can avoid seeing a lot of irrelevant data.</figcaption></figure>
+<p>Add <code>tile_bin_particles</code> to <code>Shaders.metal</code>:</p>
+<figure class="code-block"><figcaption class="code-title"><span>Shaders.metal</span><span class="code-note">New tile_bin_particles</span></figcaption><pre><code class="language-cpp">const uint pixelX = min(uint(position.x * params.width), params.width - 1);
+const uint pixelY = min(uint(position.y * params.height), params.height - 1);
+const uint tileX = min(pixelX / params.tileSize, params.tilesX - 1);
+const uint tileY = min(pixelY / params.tileSize, params.tilesY - 1);
+const uint tileIndex = tileY * params.tilesX + tileX;
+atomic_fetch_add_explicit(&amp;tileCounts[tileIndex], 1u, memory_order_relaxed);</code></pre></figure>
+<p>The CPU side then converts this tileCounts buffer into a heat map to quickly see whether the distribution is correct:</p>
+<figure><img alt="Tile occupancy heatmap" src="../images/results/MetalCppRenderingEngine/08-engine-tile-heatmap.png"/><figcaption>Heat map results of tile binning. The hotter the color, the more particles are allocated to this tile. Book 3 uses this to validate the tile list construction logic.</figcaption></figure>
+<h2 id="verification">Verification</h2>
+<p>The verification of Book 3 is no longer just "whether there is a picture." The current reference implementation should also give after each run:</p>
+<ul>
+<li><code>engine-reference.ppm</code>: whether reference render is stable</li>
+<li><code>engine-blur.ppm</code>: Is the blur kernel normal?</li>
+<li><code>engine-particles.ppm</code>: Is particle ping-pong normal?</li>
+<li><code>engine-tile-heatmap.ppm</code>: Is tile binning normal?</li>
+<li><code>engine-metrics.txt</code>：profiling、average luminance、prefix output、tile counts</li>
+</ul>
+<p>If you continue to optimize threadgroup size, buffer layout, or kernel number, fix this batch of outputs first, and then gradually compare timing changes.</p>
+<h2 id="gpu-capture-debug">GPU Capture and Debug</h2>
+<p>Book 3's result images and metrics can only tell you "whether the results have changed" and "approximately how long one frame took." If you want to see every encoder, every dispatch, and every buffer binding, you need Xcode GPU Capture.</p>
+<p>The current reference program is a command line target that can be launched directly from Xcode or Instruments. When debugging, focus on three things:</p>
+<ul>
+<li>Whether <code>render_mesh</code>, <code>blur_image</code>, <code>reduce_luminance</code>, <code>prefix_sum_16</code>, <code>particle_step</code>, <code>rasterize_particles</code>, <code>tile_bin_particles</code> appear in the same command buffer in the order in the book.</li>
+<li>Whether the buffer index bound to each pass is consistent with <code>[[buffer(n)]]</code> in <code>Shaders.metal</code>.</li>
+<li>Does the threadgroup size comply with the settings in this chapter: image pass uses a two-dimensional threadgroup, particle and tile pass use a one-dimensional threadgroup, and reduction uses 256 threads.</li>
+</ul>
+<p>If a certain result picture is black, first check the resource binding in GPU Capture; if the metrics are obviously slower, first check which dispatch in the command buffer takes longer. This debugging sequence is consistent with the teaching sequence in this book.</p>
+<h2 id="cmake-changes">CMake Changes</h2>
+<p>The target of Book 3 still remains pure C++, and no new GUI dependencies are added. The minimum target of Book 3 in the current `CMakeLists.txt` is defined as follows:</p>
+<figure class="code-block"><figcaption class="code-title"><span>CMakeLists.txt</span></figcaption><pre><code class="language-cmake">add_executable(MetalCppRenderingEngine
+    src/MetalCppRenderingEngine/main.cpp)</code></pre></figure>
+<p>Since shaders are still compiled separately, Book 3's `.metal -&gt;.air -&gt;.metallib` rules remain the same as those of the previous two books:</p>
+<figure class="code-block"><figcaption class="code-title"><span>CMakeLists.txt</span></figcaption><pre><code class="language-cmake">set(BOOK3_DIR "${CMAKE_BINARY_DIR}/MetalCppRenderingEngine")
+set(BOOK3_METALLIB "${BOOK3_DIR}/default.metallib")
+add_custom_command(
+    OUTPUT "${BOOK3_METALLIB}"
+    COMMAND xcrun -sdk macosx metal
+            "-fmodules-cache-path=${BOOK3_DIR}/ModuleCache"
+            -c "${CMAKE_CURRENT_SOURCE_DIR}/src/MetalCppRenderingEngine/Shaders.metal"
+            -o "${BOOK3_DIR}/Shaders.air"
+    COMMAND xcrun -sdk macosx metallib
+            "${BOOK3_DIR}/Shaders.air"
+            -o "${BOOK3_METALLIB}"
+    DEPENDS src/MetalCppRenderingEngine/Shaders.metal)</code></pre></figure>
+<h2 id="reference-code">Reference Code</h2>
+<p>The final reference code directory is <code>src/MetalCppRenderingEngine/</code>. If you want to check the final version of Book 3, you can check the following file list:</p>
+<p>The following is also a directory listing, not a code block to be pasted into the source code.</p>
+<figure class="code-block"><figcaption class="code-title"><span>project layout</span></figcaption><pre><code class="language-text">src/MetalCppRenderingEngine/
+  main.cpp
+  Shaders.metal
+build/MetalCppRenderingEngine/
+  engine-reference.ppm
+  engine-blur.ppm
+  engine-particles.ppm
+  engine-tile-heatmap.ppm
+  engine-metrics.txt</code></pre></figure>
+<ul>
+<li><code>main.cpp</code>: Corresponds to `Reference Renderer`, `Profiling First`, `CPU/GPU Synchronization`, `Frame Resources`, `Uniform Ring Buffer`, `Data Layout`, `Pipeline and Resource Cache`, `Threadgroup Shape`, `Verification`, responsible for pipeline, dispatch, metrics and output files.</li>
+<li><code>Shaders.metal</code>: Corresponds to `Reference Renderer`, `Parallel Reduction`, `Prefix Sum`, `Image Convolution`, `Particle Simulation`, `Tile-Based Culling`, including all Book 3 compute kernels.</li>
+</ul>
+<p>The last paragraph is still a run command to verify that you have completed the current version of the entire book.</p>
+<figure class="code-block"><figcaption class="code-title"><span>terminal</span></figcaption><pre><code class="language-sh">cmake -S . -B build
+cmake --build build --target MetalCppRenderingEngine
+./build/MetalCppRenderingEngine/MetalCppRenderingEngine</code></pre></figure>
+</main>
+</body>
+</html>

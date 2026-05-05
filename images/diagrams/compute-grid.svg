@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 520" role="img">
+  <rect width="1000" height="520" fill="#fffdf7"/>
+  <style>
+    .title{font:700 42px Georgia,serif;fill:#14201d}
+    .label{font:700 28px Helvetica,Arial,sans-serif;fill:#f3efe2}
+    .small{font:20px Helvetica,Arial,sans-serif;fill:#4f625c}
+    .mono{font:22px Menlo,Consolas,monospace;fill:#ffd88a}
+    .box{fill:#173c45;stroke:#7ea9b1;stroke-width:3}
+    .light{fill:#fffaf0;stroke:#d8d0c0;stroke-width:3}
+    .gold{fill:#8d7047}
+    .blue{fill:#34718a}
+    .green{fill:#5b8f54}
+    .line{stroke:#f3efe2;stroke-width:7;stroke-linecap:round}
+    .accent{stroke:#ffd88a;stroke-width:7;stroke-linecap:round}
+  </style>
+
+  <text x="52" y="70" class="title">One GPU thread writes one pixel</text>
+  <g transform="translate(150 120)">
+    <rect x="0" y="0" width="660" height="300" rx="18" class="light"/>
+    <path d="M0 0V300" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M60 0V300" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M120 0V300" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M180 0V300" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M240 0V300" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M300 0V300" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M360 0V300" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M420 0V300" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M480 0V300" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M540 0V300" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M600 0V300" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M660 0V300" stroke="#d8d0c0" stroke-width="2"/>
+    <path d="M0 0H660" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M0 60H660" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M0 120H660" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M0 180H660" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M0 240H660" stroke="#d8d0c0" stroke-width="2"/>
+<path d="M0 300H660" stroke="#d8d0c0" stroke-width="2"/>
+    <rect x="180" y="120" width="180" height="120" fill="none" stroke="#b6462f" stroke-width="8"/>
+    <text x="270" y="270" text-anchor="middle" class="mono">threadgroup</text>
+  </g>
+  <text x="150" y="465" class="small">The grid covers the image. Bounds checks protect the edge pixels.</text>
+
+</svg>

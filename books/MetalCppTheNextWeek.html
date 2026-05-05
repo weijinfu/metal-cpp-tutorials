@@ -1,0 +1,494 @@
+<!doctype html>
+
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1" name="viewport"/>
+<title>Metal-cpp: Offscreen Tiny Renderer</title>
+<link href="../style/book.css" rel="stylesheet"/>
+<script defer="" src="../style/syntax-highlight.js"></script>
+</head>
+<body>
+<main class="book">
+<nav class="book-nav"><a href="../index.html">Back to books</a></nav>
+<h1 id="metal-cpp-offscreen-tiny-renderer">Metal-cpp: Offscreen Tiny Renderer</h1>
+<p class="book-author">By <a href="https://weijinfu.github.io">Jinfu Wei</a> and <a href="https://chatgpt.com/codex">Codex</a></p>
+<p>This book implements a pure C++ off-screen renderer. You'll create color attachments, depth attachments, a render pipeline, vertex/index buffers, textures, samplers, and camera uniforms in code, and then read the results back to the CPU as <code>PPM</code>, <code>PNG</code>, or <code>JPG</code> images.</p>
+<p>All result images in the book are from the same rendering program. To make lighting differences easier to observe, this book uses two sets of test assets:</p>
+<ul>
+<li><code>assets/meshes/uv_sphere.obj</code> + <code>assets/textures/warm_metal.ppm</code>: Used to compare the results of <code>Albedo Only</code>, <code>Lambert</code>, <code>Blinn-Phong</code> and <code>PBR</code>.</li>
+<li><code>assets/meshes/uv_sphere.obj</code> + <code>assets/textures/rusty_metal_02_basecolor.png</code>: Used to verify how the downloaded PBR texture package is connected to the current renderer.</li>
+<li><code>assets/meshes/stanford_bunny.obj</code> + <code>assets/textures/clay.ppm</code>: Used to check the light, dark and highlights on complex surfaces.</li>
+</ul>
+<p>After completing the main text, you should be able to replace the OBJ and material image files yourself and generate the corresponding off-screen rendering results.</p>
+<h2 id="overview">Overview</h2>
+<p>Book 1 has established the basic Metal execution model: the CPU creates resources and commands, the GPU executes the shader, and then writes the results back to the image. Book 2 retains the end point of "outputting images" and replaces the intermediate steps with the render pipeline: the vertex shader processes the geometry, the fragment shader calculates the material and lighting, and the render pass writes the pixels into the off-screen texture.</p>
+<figure><img alt="Compute pipeline and render pipeline comparison" src="../images/diagrams/compute-vs-render.svg"/><figcaption>Both Book 1 and Book 2 write their results as images; the difference is that Book 2 starts using a vertex shader, a fragment shader, and a render pass.</figcaption></figure>
+<p>The following paragraph is the command to be executed at the current stage, not the content written into a source file. Use it first to confirm that the project can be configured, compiled and run.</p>
+<figure class="code-block"><figcaption class="code-title"><span>terminal</span></figcaption><pre><code class="language-sh">cmake -S . -B build
+cmake --build build --target MetalCppTinyRenderer
+
+./build/MetalCppTinyRenderer/MetalCppTinyRenderer \
+  assets/meshes/uv_sphere.obj \
+  assets/textures/warm_metal.ppm \
+  lambert \
+  build/MetalCppTinyRenderer/lambert.png</code></pre></figure>
+<h2 id="project-layout">Project Layout</h2>
+<p>First split the project into three files. Each subsequent chapter will continue to add content to these three files:</p>
+<p>The following paragraph is not to be copied to a source file, but an explanation of the current minimum directory division of work in Book 2.</p>
+<figure class="code-block"><figcaption class="code-title"><span>project layout</span></figcaption><pre><code class="language-text">main.cpp      # command line arguments and output path
+Renderer.cpp  # mesh/texture loading, camera, offscreen render pass, image writeback
+Shaders.metal # vertex shader and four fragment shader stages</code></pre></figure>
+<p><code>main.cpp</code> is responsible for command line parameters, <code>Renderer.cpp</code> is responsible for resources and draw path, and <code>Shaders.metal</code> is responsible for vertex and fragment shaders.</p>
+<h2 id="device-and-command-queue">Device and Command Queue</h2>
+<p>Create <code>MTL::Device</code> and <code>MTL::CommandQueue</code> first. This step is exactly the same as in Book 1. All subsequent render passes are submitted through this queue.</p>
+<figure><img alt="Device, Command Queue, and Command Buffer relationship" src="../images/diagrams/device-command-queue.svg"/><figcaption><code>MTL::Device</code> creates the resource, <code>MTL::CommandQueue</code> creates and submits the command buffer.</figcaption></figure>
+<p>Open <code>Renderer.cpp</code> and add the following code during the device initialization phase. This is a new addition, not a replacement of any previous functions.</p>
+<figure class="code-block"><figcaption class="code-title"><span>Renderer.cpp</span></figcaption><pre><code class="language-cpp">MTL::Device* device = MTL::CreateSystemDefaultDevice();
+if (!device)
+{
+    std::cerr &lt;&lt; "Metal is not available on this Mac.\n";
+    return false;
+}
+
+MTL::CommandQueue* queue = device-&gt;newCommandQueue();</code></pre></figure>
+<h2 id="offscreen-render-target">Offscreen Render Target</h2>
+<p>This chapter starts by creating off-screen color texture and depth texture. The render pass will write the color into the color attachment and the depth into the depth attachment; after one frame ends, the CPU will read back the color texture and save it as an image file.</p>
+<p>Continue to modify <code>Renderer.cpp</code>. First, add an auxiliary code segment for creating color texture; it belongs to the new texture creation logic and can be added directly next to the resource creation related functions.</p>
+<figure class="code-block"><figcaption class="code-title"><span>Renderer.cpp</span></figcaption><pre><code class="language-cpp">MTL::TextureDescriptor* descriptor = MTL::TextureDescriptor::alloc()-&gt;init();
+descriptor-&gt;setTextureType(MTL::TextureType2D);
+descriptor-&gt;setPixelFormat(MTL::PixelFormatBGRA8Unorm);
+descriptor-&gt;setWidth(width);
+descriptor-&gt;setHeight(height);
+descriptor-&gt;setStorageMode(MTL::StorageModeManaged);
+descriptor-&gt;setUsage(MTL::TextureUsageRenderTarget);
+MTL::Texture* colorTexture = device-&gt;newTexture(descriptor);</code></pre></figure>
+<p>Then in the same file, continue adding the render pass descriptor before encoding the draw call. It relies on <code>colorTexture</code> created above.</p>
+<figure class="code-block"><figcaption class="code-title"><span>Renderer.cpp</span></figcaption><pre><code class="language-cpp">MTL::RenderPassDescriptor* pass = MTL::RenderPassDescriptor::renderPassDescriptor();
+MTL::RenderPassColorAttachmentDescriptor* color = pass-&gt;colorAttachments()-&gt;object(0);
+color-&gt;setTexture(colorTexture);
+color-&gt;setLoadAction(MTL::LoadActionClear);
+color-&gt;setStoreAction(MTL::StoreActionStore);
+color-&gt;setClearColor(MTL::ClearColor(0.08, 0.22, 0.25, 1.0));</code></pre></figure>
+<p>After completing this step, the program already has a complete "render to texture -&gt; readback -&gt; write image" path.</p>
+<h2 id="mesh-and-texture-input">Mesh and Texture Input</h2>
+<p>Next add external input. This renderer reads two file formats:</p>
+<ul>
+<li><code>OBJ</code>: reads <code>v</code>, <code>vt</code>, <code>vn</code>, and <code>f</code></li>
+<li><code>PPM / PNG / JPG</code>: Read the base color map; the reference code decodes common image formats through <code>ImageIO</code></li>
+</ul>
+<p>Go back to <code>main.cpp</code> first. Add the following four lines of default values ​​in the command line parameter parsing section, allowing the program to read mesh, texture, stage and output paths from external files.</p>
+<figure class="code-block"><figcaption class="code-title"><span>main.cpp</span></figcaption><pre><code class="language-cpp">options.meshPath = argc &gt; 1 ? argv[1] : "assets/meshes/uv_sphere.obj";
+options.texturePath = argc &gt; 2 ? argv[2] : "assets/textures/warm_metal.ppm";
+options.stage = argc &gt; 3 ? argv[3] : "lambert";
+options.outputPath = argc &gt; 4 ? argv[4] : "build/MetalCppTinyRenderer/lambert.png";</code></pre></figure>
+<p>Keep the draw path unchanged and only replace the mesh and texture. You can then use the same program to compare the shading results on different assets.</p>
+<p>If OBJ does not provide <code>vn</code>, the reference code will automatically generate smooth normals based on the triangle geometry; if there is no <code>vt</code>, the reference code will give a basic UV to facilitate continued observation of lighting results.</p>
+<h2 id="camera-and-framing">Camera and Framing</h2>
+<p>After having the external mesh, you need to first solve "where to place the lens". Here, the camera position is estimated based on mesh bounds, and the observation matrix and projection matrix are calculated.</p>
+<p>Continue to modify <code>Renderer.cpp</code>. Add camera framing related code where uniform data is prepared; if you already have <code>mesh</code>, <code>width</code> and <code>height</code>, you can connect this section.</p>
+<figure class="code-block"><figcaption class="code-title"><span>Renderer.cpp</span></figcaption><pre><code class="language-cpp">Vec3 eye = fitCameraPosition(mesh);
+Vec3 target = meshCenter(mesh);
+Mat4 view = lookAt(eye, target, {0.0f, 1.0f, 0.0f});
+Mat4 proj = perspective(45.0f, float(width) / float(height), 0.1f, 100.0f);</code></pre></figure>
+<p>When running the program, if the model can completely fall into the screen, it means that the camera framing is working properly.</p>
+<h2 id="vertex-shader">Vertex Shader</h2>
+<p>The a vertex shader in Book 2 is responsible for three things:</p>
+<ul>
+<li>Multiply the object-space vertices by <code>mvp</code> and send them to the rasterizer</li>
+<li>Pass the world position to the fragment shader for use in sight and highlight formulas</li>
+<li>Continue to pass normal and uv to the back</li>
+</ul>
+<p>Open <code>Shaders.metal</code>. First add the vertex input structure <code>Vertex</code> and the vertex output structure <code>VertexOut</code>. This is a new type definition that can be placed directly near the existing <code>Uniforms</code> at the beginning of the file.</p>
+<figure class="code-block"><figcaption class="code-title"><span>Shaders.metal</span></figcaption><pre><code class="language-cpp">struct Vertex
+{
+    packed_float3 position;
+    packed_float3 normal;
+    float2 uv;
+};
+
+struct VertexOut
+{
+    float4 position [[position]];
+    float3 worldPosition;
+    float3 normal;
+    float2 uv;
+};</code></pre></figure>
+<p>After the structure is ready, continue to add <code>vertex_main</code> to <code>Shaders.metal</code>. If the old vertex function already exists in the file, replace it with this version; if it does not exist yet, just add it directly.</p>
+<figure class="code-block"><figcaption class="code-title"><span>Shaders.metal</span></figcaption><pre><code class="language-cpp">vertex VertexOut vertex_main(uint vertexID [[vertex_id]],
+                             device const Vertex* vertices [[buffer(0)]],
+                             constant Uniforms&amp; uniforms [[buffer(1)]])
+{
+    const Vertex vtx = vertices[vertexID];
+    const float3 position = float3(vtx.position);
+    const float3 normal = float3(vtx.normal);
+    VertexOut out;
+    out.position = uniforms.mvp * float4(position, 1.0);
+    out.worldPosition = (uniforms.model * float4(position, 1.0)).xyz;
+    out.normal = normalize((uniforms.model * float4(normal, 0.0)).xyz);
+    out.uv = vtx.uv;
+    return out;
+}</code></pre></figure>
+<h2 id="texture-sampling">Texture Sampling</h2>
+<p>The texture path is accessed in this chapter. The a fragment shader first takes out <code>albedo</code> from the texture, and all subsequent lighting algorithms continue to calculate on this basis.</p>
+<p>First, add a new data structure to save the decoding results in <code>Renderer.cpp</code>. This structure is new and can be placed directly after the mesh / uniform related structure.</p>
+<figure class="code-block"><figcaption class="code-title"><span>Renderer.cpp</span><span class="code-note">New TextureData and MaterialTextures</span></figcaption><pre><code class="language-cpp">struct TextureData
+{
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::vector&lt;uint8_t&gt; rgba;
+};
+
+struct MaterialTextures
+{
+    TextureData baseColor;
+    TextureData roughness;
+    TextureData metallic;
+    TextureData normal;
+    TextureData ao;
+};</code></pre></figure>
+<p>If you are still in the stage of only supporting PPM, the next step is to write out the most basic PPM decoding function. The following code is added to <code>Renderer.cpp</code> and is usually placed in the resource loading auxiliary function area.</p>
+<figure class="code-block"><figcaption class="code-title"><span>Renderer.cpp</span><span class="code-note">New loadPPM</span></figcaption><pre><code class="language-cpp">TextureData loadPPM(const std::filesystem::path&amp; path)
+{
+    std::ifstream in(path);
+    if (!in)
+    {
+        thline std::runtime_error("Could not open texture: " + path.string());
+    }
+    if (nextToken(in) != "P3")
+    {
+        thline std::runtime_error("Only ASCII P3 PPM textures are supported.");
+    }
+
+    TextureData texture;
+    texture.width = static_cast&lt;uint32_t&gt;(std::stoul(nextToken(in)));
+    texture.height = static_cast&lt;uint32_t&gt;(std::stoul(nextToken(in)));
+    const int maxValue = std::stoi(nextToken(in));
+    texture.rgba.resize(texture.width * texture.height * 4);
+
+    for (uint32_t i = 0; i &lt; texture.width * texture.height; ++i)
+    {
+        const int r = std::stoi(nextToken(in));
+        const int g = std::stoi(nextToken(in));
+        const int b = std::stoi(nextToken(in));
+        texture.rgba[i * 4 + 0] = static_cast&lt;uint8_t&gt;(r * 255 / maxValue);
+        texture.rgba[i * 4 + 1] = static_cast&lt;uint8_t&gt;(g * 255 / maxValue);
+        texture.rgba[i * 4 + 2] = static_cast&lt;uint8_t&gt;(b * 255 / maxValue);
+        texture.rgba[i * 4 + 3] = 255;
+    }
+    return texture;
+}</code></pre></figure>
+<p>Then continue to add the decoding function of <code>PNG/JPG</code> in <code>Renderer.cpp</code>. This function is new and does not replace <code>loadPPM()</code>; it exists side by side with <code>loadPPM()</code>.</p>
+<figure class="code-block"><figcaption class="code-title"><span>Renderer.cpp</span><span class="code-note">New loadImageWithImageIO</span></figcaption><pre><code class="language-cpp">TextureData loadImageWithImageIO(const std::filesystem::path&amp; path)
+{
+    CFStringRef pathString = CFStringCreateWithCString(kCFAllocatorDefault, path.string().c_str(), kCFStringEncodingUTF8);
+    CFURLRef url = CFURLCreateWithFileSystemPath(kCFAllocatorDefault, pathString, kCFURLPOSIXPathStyle, false);
+    CFRelease(pathString);
+
+    CGImageSourceRef source = CGImageSourceCreateWithURL(url, nullptr);
+    CFRelease(url);
+    CGImageRef image = CGImageSourceCreateImageAtIndex(source, 0, nullptr);
+    CFRelease(source);
+
+    TextureData texture;
+    texture.width = static_cast&lt;uint32_t&gt;(CGImageGetWidth(image));
+    texture.height = static_cast&lt;uint32_t&gt;(CGImageGetHeight(image));
+    texture.rgba.resize(static_cast&lt;size_t&gt;(texture.width) * texture.height * 4);
+
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    CGContextRef context = CGBitmapContextCreate(
+        texture.rgba.data(),
+        texture.width,
+        texture.height,
+        8,
+        texture.width * 4,
+        colorSpace,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(colorSpace);
+
+    CGContextDrawImage(context, CGRectMake(0, 0, texture.width, texture.height), image);
+    CGContextRelease(context);
+    CGImageRelease(image);
+    return texture;
+}</code></pre></figure>
+<p>First modify the texture reading function in <code>Renderer.cpp</code>, and change the original entry that only supports PPM to "select loader by extension". This is replacing the old function call, not adding a new parallel branch.</p>
+<figure class="code-block is-modified"><figcaption class="code-title"><span>Renderer.cpp</span><span class="code-note">Modify the loadTexture entry, yellow = modified</span></figcaption><pre><code class="language-cpp"><span class="code-line">std::string extension = path.extension().string();</span>
+<span class="code-line">std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char c) {</span>
+<span class="code-line">    return static_cast&lt;char&gt;(std::tolower(c));</span>
+<span class="code-line">});</span>
+<span class="code-line">if (extension == ".ppm")</span>
+<span class="code-line">{</span>
+<span class="code-line">    return loadPPM(path);</span>
+<span class="code-line">}</span>
+<span class="code-line line-mark">return loadImageWithImageIO(path);</span></code></pre></figure>
+<p>If you want to continue to support a whole set of PBR maps, add a new material map collection function in <code>Renderer.cpp</code>. It first reads the base color passed in from the command line, and then tries to automatically find roughness, metallic, normal and AO in the same directory.</p>
+<figure class="code-block"><figcaption class="code-title"><span>Renderer.cpp</span><span class="code-note">New loadMaterialTextures</span></figcaption><pre><code class="language-cpp">MaterialTextures loadMaterialTextures(const RenderOptions&amp; options, const Uniforms&amp; uniforms)
+{
+    MaterialTextures textures;
+    textures.baseColor = loadTexture(options.texturePath);
+    textures.roughness = makeSolidTexture(
+        static_cast&lt;uint8_t&gt;(std::clamp(uniforms.roughness, 0.0f, 1.0f) * 255.0f),
+        static_cast&lt;uint8_t&gt;(std::clamp(uniforms.roughness, 0.0f, 1.0f) * 255.0f),
+        static_cast&lt;uint8_t&gt;(std::clamp(uniforms.roughness, 0.0f, 1.0f) * 255.0f));
+    textures.metallic = makeSolidTexture(
+        static_cast&lt;uint8_t&gt;(std::clamp(uniforms.metallic, 0.0f, 1.0f) * 255.0f),
+        static_cast&lt;uint8_t&gt;(std::clamp(uniforms.metallic, 0.0f, 1.0f) * 255.0f),
+        static_cast&lt;uint8_t&gt;(std::clamp(uniforms.metallic, 0.0f, 1.0f) * 255.0f));
+    textures.normal = makeSolidTexture(128, 128, 255);
+    textures.ao = makeSolidTexture(255, 255, 255);
+
+    const std::array&lt;std::pair&lt;std::string, TextureData*&gt;, 4&gt; optionalMaps = {{
+        {"_roughness", &amp;textures.roughness},
+        {"_metallic", &amp;textures.metallic},
+        {"_normal", &amp;textures.normal},
+        {"_ao", &amp;textures.ao},
+    }};
+
+    for (const auto&amp; [suffix, target] : optionalMaps)
+    {
+        const std::filesystem::path candidate = siblingTexturePath(options.texturePath, suffix);
+        if (std::filesystem::exists(candidate))
+        {
+            *target = loadTexture(candidate);
+        }
+    }
+    return textures;
+}</code></pre></figure>
+<p>Then continue in <code>Renderer.cpp</code> and <code>renderScene()</code> to replace the old single map reading with the material map group reading. Here is a modification to the original texture/sampler initialization code.</p>
+<figure class="code-block is-modified"><figcaption class="code-title"><span>Renderer.cpp</span><span class="code-note">Modify the texture binding in renderScene, green = new, yellow = modified</span></figcaption><pre><code class="language-cpp"><span class="code-line line-mark">MaterialTextures materialTextures = loadMaterialTextures(options, uniforms);</span>
+<span class="code-line line-mark">MTL::Texture* baseColorTexture = createTexture(device, materialTextures.baseColor);</span>
+<span class="code-line line-add">MTL::Texture* roughnessTexture = createTexture(device, materialTextures.roughness);</span>
+<span class="code-line line-add">MTL::Texture* metallicTexture = createTexture(device, materialTextures.metallic);</span>
+<span class="code-line line-add">MTL::Texture* normalTexture = createTexture(device, materialTextures.normal);</span>
+<span class="code-line line-add">MTL::Texture* aoTexture = createTexture(device, materialTextures.ao);</span>
+<span class="code-line">MTL::SamplerState* sampler = createSampler(device);</span></code></pre></figure>
+<p>If the file name ends with <code>_basecolor</code>, the reference code will also automatically look for <code>_roughness</code>, <code>_metallic</code>, <code>_normal</code> and <code>_ao</code> in the same directory. In this way, the command line only needs to pass the base color path, and the same set of PBR texture packages can be connected together.</p>
+<h2 id="rendering-progression">Rendering Progression</h2>
+<p>Let's start improving the rendering results in order. The four sphere images use the same set of mesh, texture, camera and light. Vertex data, cameras, draw calls, render passes all remain the same, the changes focus on how the fragment shader interprets these inputs.</p>
+<ul>
+<li>mesh: <code>assets/meshes/uv_sphere.obj</code></li>
+<li>texture: <code>assets/textures/warm_metal.ppm</code></li>
+<li>camera/light: remain unchanged</li>
+</ul>
+<p>You can think of these four stages as "gradually adding information to the same set of renderers":</p>
+<figure class="code-block"><figcaption class="code-title"><span>algorithm summary</span></figcaption><pre><code class="language-text">Albedo Only        = base color
+Lambert Diffuse    = base color + normal + light
+Blinn-Phong        = Lambert + view + highlight
+Metallic-Roughness = base color + normal + roughness
+                     metallic + AO + Fresnel/GGX</code></pre></figure>
+<figure><img alt="Overview of the four shading stages" src="../images/diagrams/shading-progression-overview.svg"/><figcaption>The difference between the four stages is not to replace a new renderer, but to gradually add new coloring items to the same draw path.</figcaption></figure>
+<p>These four stages can be understood as four questions:</p>
+<ul>
+<li><code>Albedo Only</code>: Whether the texture is correctly uploaded and mapped to the model.</li>
+<li><code>Lambert</code>: How brighter the surface should be when facing the light source.</li>
+<li><code>Blinn-Phong</code>: How the highlight should change when the viewing direction changes.</li>
+<li><code>PBR</code>: How roughness, metallicity, and AO work together to control energy distribution.</li>
+</ul>
+<h3 id="algorithm-1-albedo-only">Algorithm 1: Albedo Only</h3>
+<p>The first step is to display only the base color. This stage is used to check whether uv, sampler and texture upload are correct.</p>
+<p>Add a new fragment function <code>fragment_albedo</code> in <code>Shaders.metal</code>. This is the first version of the fragment shader and does not require modification of other fragment functions.</p>
+<figure class="code-block"><figcaption class="code-title"><span>Shaders.metal</span><span class="code-note">New fragment_albedo</span></figcaption><pre><code class="language-cpp">const float3 albedo = baseColor.sample(baseSampler, in.uv).rgb;
+return float4(albedo, 1.0);</code></pre></figure>
+<figure><img alt="Sphere albedo only result" src="../images/results/MetalCppTinyRenderer/01-sphere-albedo.png"/><figcaption>Algorithm 1 `Albedo Only`: only base color, no light and dark changes. It first verifies that the texture path is correct.</figcaption></figure>
+<h3 id="algorithm-2-lambert-diffuse">Algorithm 2: Lambert Diffuse</h3>
+<p>The second step is to add diffuse reflection. The Lambert model only does one thing: compares the angle between the surface normal <code>N</code> and the light direction <code>L</code>. The smaller the angle, the larger the dot product <code>N · L</code> and the brighter the surface. In the current implementation, this <code>N</code> can come from geometric normals, or it can come from the world space normals of normal map after TBN transformation.</p>
+<figure><img alt="Lambert diffuse uses the dot product between normal and light direction" src="../images/diagrams/lambert-dot-product.svg"/><figcaption>At the heart of Lambert is the cosine term <code>max(N · L, 0)</code>. It converts "where the surface is facing" directly into changes in light and dark.</figcaption></figure>
+<p>Continue to add a second fragment function <code>fragment_lambert</code> in <code>Shaders.metal</code>. It is a new function added outside of <code>fragment_albedo</code>, not a modification of <code>fragment_albedo</code>.</p>
+<figure class="code-block"><figcaption class="code-title"><span>Shaders.metal</span><span class="code-note">New fragment_lambert</span></figcaption><pre><code class="language-cpp">const float3 N = sampleWorldNormal(in, normalMap, baseSampler);
+const float3 L = normalize(uniforms.lightDirection.xyz);
+const float diffuse = max(dot(N, L), 0.0);
+const float sky = 0.35 + 0.65 * clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
+const float3 color = albedo * (0.10 + 0.65 * diffuse + 0.25 * sky);
+return float4(color, 1.0);</code></pre></figure>
+<figure><img alt="Sphere Lambert result" src="../images/results/MetalCppTinyRenderer/02-sphere-lambert.png"/><figcaption>Algorithm 2 `Lambert Diffuse`: Stable light-receiving surface and backlight surface begin to appear. This step solves the problem of "where do the light and dark sides come from?"</figcaption></figure>
+<h3 id="algorithm-3-blinn-phong">Algorithm 3: Blinn-Phong</h3>
+<p>The third step is to add Blinn-Phong highlights. In addition to the normal <code>N</code> and the lighting direction <code>L</code>, now we also need the viewing direction <code>V</code>. Add <code>L</code> and <code>V</code> and normalize to get half vector <code>H</code>. When the normal is closer to <code>H</code>, the highlights will be stronger. It is not a physically correct model, but it is very suitable for novices to understand "why changes in perspective affect the position of the highlight."</p>
+<figure><img alt="Blinn-Phong uses a half vector between light and view direction" src="../images/diagrams/blinn-phong-half-vector.svg"/><figcaption>Blinn-Phong adds a specular highlight option based on Lambert. It answers the question "Why do bright spots appear at certain angles?"</figcaption></figure>
+<p>This step still modifies <code>Shaders.metal</code>, but in a different way than the previous two steps: now a new <code>fragment_blinn_phong</code> function is added, and line-level markers are used to display its extra content compared to Lambert.</p>
+<figure class="code-block is-modified"><figcaption class="code-title"><span>Shaders.metal</span><span class="code-note">New fragment_blinn_phong, green = new, yellow = modified</span></figcaption><pre><code class="language-cpp"><span class="code-line line-mark">const float3 N = sampleWorldNormal(in, normalMap, baseSampler);</span>
+<span class="code-line">const float3 L = normalize(uniforms.lightDirection.xyz);</span>
+<span class="code-line line-add">const float3 V = normalize(uniforms.cameraPosition.xyz - in.worldPosition);</span>
+<span class="code-line line-add">const float3 H = normalize(L + V);</span>
+<span class="code-line">const float diffuse = max(dot(N, L), 0.0);</span>
+<span class="code-line line-add">const float sky = 0.35 + 0.65 * clamp(N.y * 0.5 + 0.5, 0.0, 1.0);</span>
+<span class="code-line line-add">const float specular = pow(max(dot(N, H), 0.0), 48.0);</span>
+<span class="code-line line-mark">const float3 color = albedo * (0.08 + 0.55 * diffuse + 0.22 * sky) + specular * 0.28;</span></code></pre></figure>
+<figure><img alt="Sphere Blinn-Phong result" src="../images/results/MetalCppTinyRenderer/03-sphere-blinn-phong.png"/><figcaption>Algorithm 3 `Blinn-Phong`: Concentrated highlights begin to appear on the spherical surface, and the material changes from "only light and dark" to "begins to have perspective-related reflection characteristics".</figcaption></figure>
+<h3 id="algorithm-4-pbr">Algorithm 4: Metallic-Roughness PBR</h3>
+<p>Step four switches to metallic-roughness PBR. PBR still retains diffuse reflection and specular reflection, but instead of using a simple constant highlight approximation, the specular reflection is split into three parts: Fresnel, visibility and microsurface distribution. <code>metallic</code> determines whether more energy stays in diffuse or specular, <code>roughness</code> determines whether the highlight is sharp or widely dispersed, and <code>ao</code> is used to suppress over-brightness of environmental items in gaps and masking areas.</p>
+<figure><img alt="PBR combines diffuse and Cook-Torrance specular terms" src="../images/diagrams/pbr-cook-torrance.svg"/><figcaption>PBR is not "more complex specular coefficients", but breaks down the material control into more explicit physical parameters.</figcaption></figure>
+<p>Finally, add <code>fragment_pbr</code> to <code>Shaders.metal</code>. If you have already completed <code>fragment_lambert</code> and <code>fragment_blinn_phong</code>, this section can be added as a fourth independent fragment function. What remains below is the most critical piece of energy allocation logic in the current implementation.</p>
+<figure class="code-block"><figcaption class="code-title"><span>Shaders.metal</span><span class="code-note">New fragment_pbr</span></figcaption><pre><code class="language-cpp">const float3 albedo = srgbToLinear(baseColor.sample(baseSampler, in.uv).rgb);
+const float roughness = clamp(roughnessMap.sample(baseSampler, in.uv).r, 0.04, 1.0);
+const float metallic = clamp(metallicMap.sample(baseSampler, in.uv).r, 0.0, 1.0);
+const float ao = clamp(aoMap.sample(baseSampler, in.uv).r, 0.0, 1.0);
+const float3 N = sampleWorldNormal(in, normalMap, baseSampler);
+const float3 L = normalize(uniforms.lightDirection.xyz);
+const float3 V = normalize(uniforms.cameraPosition.xyz - in.worldPosition);
+const float3 H = normalize(L + V);
+const float NdotL = max(dot(N, L), 0.0);
+const float NdotV = max(dot(N, V), 0.0);
+const float NdotH = max(dot(N, H), 0.0);
+const float VdotH = max(dot(V, H), 0.0);
+const float D = distributionGGX(NdotH, roughness);
+const float G = geometrySchlickGGX(NdotV, roughness)
+              * geometrySchlickGGX(NdotL, roughness);
+const float3 F0 = mix(float3(0.04), albedo, metallic);
+const float3 F = fresnelSchlick(VdotH, F0);
+const float3 specular = (D * G * F) / max(4.0 * NdotV * NdotL, 1.0e-5);
+const float3 kD = (1.0 - F) * (1.0 - metallic);
+const float3 diffuse = kD * albedo / M_PI_F;
+const float skyMix = clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
+const float3 ambientDiffuse = albedo * (0.18 + 0.22 * skyMix) * (1.0 - metallic) * ao;
+float3 color = (diffuse + specular) * NdotL;
+color += ambientDiffuse * uniforms.ambient;
+color = tonemapACES(color);</code></pre></figure>
+<figure><img alt="Sphere PBR result" src="../images/results/MetalCppTinyRenderer/04-sphere-pbr.png"/><figcaption>Algorithm 4 `Metallic-Roughness PBR`: Now instead of just "adding a more complex highlight", we start putting diffuse, specular, roughness, metallic, and AO into the same energy distribution.</figcaption></figure>
+<h2 id="downloaded-pbr-material">Downloaded PBR Material</h2>
+<p>The first four stages mainly verify the algorithm sequence. Next, switch to a set of real PBR texture packages, check whether the current implementation can read the base color, roughness, metallic, normal and ambient occlusion, and combine this information into the final result.</p>
+<p>This section uses the <code>Rusty Metal 02</code> 1K texture of <code>Poly Haven</code>. Five split pictures have been saved in the repository:</p>
+<ul>
+<li><code>rusty_metal_02_basecolor.png</code></li>
+<li><code>rusty_metal_02_roughness.png</code></li>
+<li><code>rusty_metal_02_metallic.png</code></li>
+<li><code>rusty_metal_02_normal.png</code></li>
+<li><code>rusty_metal_02_ao.png</code></li>
+</ul>
+<p>This particular material is useful for checking the texture-loading path, but its metallic map is fully black in this repository. That means the PBR result still behaves like a rough oxidized surface rather than a strongly reflective bare metal surface. A material with nonzero metallic values and an environment map would be needed for a more convincing metal reflection.</p>
+<p>There is no need to add a new program entry in this section, only the previous renderer needs to be reused. The following paragraph is the running command, not the content written into a source file.</p>
+<figure class="code-block"><figcaption class="code-title"><span>terminal</span></figcaption><pre><code class="language-sh">./build/MetalCppTinyRenderer/MetalCppTinyRenderer \
+  assets/meshes/uv_sphere.obj \
+  assets/textures/rusty_metal_02_basecolor.png \
+  lambert \
+  images/results/MetalCppTinyRenderer/08-rusty-metal-lambert.png
+
+./build/MetalCppTinyRenderer/MetalCppTinyRenderer \
+  assets/meshes/uv_sphere.obj \
+  assets/textures/rusty_metal_02_basecolor.png \
+  blinn \
+  images/results/MetalCppTinyRenderer/10-rusty-metal-blinn.png
+
+./build/MetalCppTinyRenderer/MetalCppTinyRenderer \
+  assets/meshes/uv_sphere.obj \
+  assets/textures/rusty_metal_02_basecolor.png \
+  pbr \
+  images/results/MetalCppTinyRenderer/09-rusty-metal-pbr.png</code></pre></figure>
+<figure><img alt="Rusty metal Lambert result" src="../images/results/MetalCppTinyRenderer/08-rusty-metal-lambert.png"/><figcaption>The downloaded PBR material is first verified using `Lambert`: whether the base color and normal map have been correctly entered into the shader.</figcaption></figure>
+<figure><img alt="Rusty metal Blinn-Phong result" src="../images/results/MetalCppTinyRenderer/10-rusty-metal-blinn.png"/><figcaption>`Blinn-Phong` will start to give specular highlights, but not yet the energy distribution that roughness and metallic bring.</figcaption></figure>
+<figure><img alt="Rusty metal PBR result" src="../images/results/MetalCppTinyRenderer/09-rusty-metal-pbr.png"/><figcaption>After `PBR` connects roughness, metallic and AO together, the roughness and occlusion maps make the lighting response more stable. Because this material's metallic map is black, the result should read as oxidized surface detail rather than mirror-like exposed metal.</figcaption></figure>
+<h2 id="test-assets">Test Assets</h2>
+<p>The following three sets of assets will be used repeatedly in the second half of this book:</p>
+<ul>
+<li><code>uv_sphere.obj</code>: Used to compare the results of different lighting algorithms on continuous surfaces.</li>
+<li><code>warm_metal.ppm</code>: Used to observe the color and highlight of the same surface under different shading models.</li>
+<li><code>rusty_metal_02_*.png</code>: Used to verify how the PBR texture package downloaded from the Internet is connected to the current renderer.</li>
+<li><code>stanford_bunny.obj</code>: Used to check the distribution of light, backlight and highlight on complex curved surfaces.</li>
+</ul>
+<p>If you want to replace your own assets, give priority to OBJs with normals, complete uvs, and <code>PPM</code>, <code>PNG</code> or <code>JPG</code> maps that are not too large in size.</p>
+<h2 id="complex-geometry">Complex Geometry</h2>
+<p>Spheres are good for comparing algorithm sequences, and complex models are better for checking mesh loaders, camera framing, and highlights on real surfaces. Here we use Stanford Bunny for the second set of verifications.</p>
+<p>There is no need to change the source code in this section. You only need to reuse the previously written program and rerun it with a different set of command line inputs.</p>
+<figure class="code-block"><figcaption class="code-title"><span>terminal</span></figcaption><pre><code class="language-sh">./build/MetalCppTinyRenderer/MetalCppTinyRenderer \
+  assets/meshes/stanford_bunny.obj \
+  assets/textures/clay.ppm \
+  lambert \
+  images/results/MetalCppTinyRenderer/05-bunny-lambert.png
+
+./build/MetalCppTinyRenderer/MetalCppTinyRenderer \
+  assets/meshes/stanford_bunny.obj \
+  assets/textures/clay.ppm \
+  blinn \
+  images/results/MetalCppTinyRenderer/06-bunny-blinn-phong.png</code></pre></figure>
+<figure><img alt="Bunny Lambert result" src="../images/results/MetalCppTinyRenderer/05-bunny-lambert.png"/><figcaption>Stanford Bunny `Lambert`: The first thing exposed is camera framing, normal direction and surface form.</figcaption></figure>
+<figure><img alt="Bunny Blinn-Phong result" src="../images/results/MetalCppTinyRenderer/06-bunny-blinn-phong.png"/><figcaption>Stanford Bunny `Blinn-Phong`: The surface turns on the ears, back and legs are significantly easier to read with the addition of highlights.</figcaption></figure>
+<h2 id="render-pass-and-readback">Render Pass and Readback</h2>
+<p>After rendering, the GPU results are readback to the CPU. Since the color texture uses <code>StorageModeManaged</code>, do <code>blit synchronize</code> first, and then call <code>getBytes()</code> to read the pixels.</p>
+<p>Continue to modify <code>Renderer.cpp</code>. The following code is connected after the draw call ends and before writing the file; it is a new readback step that continues after the original rendering process.</p>
+<figure class="code-block"><figcaption class="code-title"><span>Renderer.cpp</span></figcaption><pre><code class="language-cpp">MTL::BlitCommandEncoder* blit = commandBuffer-&gt;blitCommandEncoder();
+blit-&gt;synchronizeTexture(colorTexture, 0, 0);
+blit-&gt;endEncoding();
+
+commandBuffer-&gt;commit();
+commandBuffer-&gt;waitUntilCompleted();
+
+colorTexture-&gt;getBytes(pixels.data(),
+                       width * 4,
+                       MTL::Region::Make2D(0, 0, width, height),
+                       0);</code></pre></figure>
+<p>Continue to modify the output part of <code>Renderer.cpp</code>, and replace the original call that fixedly writes <code>PPM</code> to select the output format according to the extension. The following paragraph is a replacement for the old <code>writePPM(...)</code> call location.</p>
+<figure class="code-block is-modified"><figcaption class="code-title"><span>Renderer.cpp</span><span class="code-note">Modify the final output call, yellow = modified</span></figcaption><pre><code class="language-cpp"><span class="code-line line-mark">writeOutputImage(options.outputPath, pixels, options.width, options.height);</span></code></pre></figure>
+<p>The reference code will now automatically choose the writing method based on the output path extension: <code>.ppm</code> continues with the original binary PPM, <code>.png</code> and <code>.jpg</code> are encoded through <code>ImageIO</code>.</p>
+<h2 id="cmake-changes">CMake Changes</h2>
+<p>The target of this book only contains two C++ source files:</p>
+<p>Open <code>CMakeLists.txt</code> and add the executable file of Book 2 in the existing target definition area of ​​the project:</p>
+<figure class="code-block"><figcaption class="code-title"><span>CMakeLists.txt</span></figcaption><pre><code class="language-cmake">add_executable(MetalCppTinyRenderer
+    src/MetalCppTinyRenderer/main.cpp
+    src/MetalCppTinyRenderer/Renderer.cpp)</code></pre></figure>
+<p>After the introduction of <code>PNG/JPG</code> texture reading and writing, the linked framework no longer only has Metal itself, but also needs to be supplemented with <code>CoreGraphics</code> and <code>ImageIO</code>.</p>
+<p>Continue to modify the same <code>CMakeLists.txt</code> target and complete the include path and framework links:</p>
+<figure class="code-block"><figcaption class="code-title"><span>CMakeLists.txt</span></figcaption><pre><code class="language-cmake">target_include_directories(MetalCppTinyRenderer PRIVATE "${METAL_CPP_ROOT}")
+target_link_libraries(MetalCppTinyRenderer PRIVATE ${METAL_FRAMEWORKS})</code></pre></figure>
+<p>If you continue to change from a version that only supports PPM, remember to also add the <code>METAL_FRAMEWORKS</code> list to the following; this step is to modify the existing framework list, not to add a new variable name.</p>
+<figure class="code-block is-modified"><figcaption class="code-title"><span>CMakeLists.txt</span><span class="code-note">Modify framework list, green = new</span></figcaption><pre><code class="language-cmake"><span class="code-line">set(METAL_FRAMEWORKS</span>
+<span class="code-line">    "-framework Foundation"</span>
+<span class="code-line line-add">    "-framework CoreGraphics"</span>
+<span class="code-line line-add">    "-framework ImageIO"</span>
+<span class="code-line">    "-framework QuartzCore"</span>
+<span class="code-line">    "-framework Metal")</span></code></pre></figure>
+<p>The shader compilation step remains <code>.metal -&gt;.air -&gt;.metallib</code>:</p>
+<p>Finally, the shader compilation command of Book 2 is still added in <code>CMakeLists.txt</code>. It is an additional build step after target is defined, rather than replacing the previous <code>add_executable</code>.</p>
+<figure class="code-block"><figcaption class="code-title"><span>CMakeLists.txt</span></figcaption><pre><code class="language-cmake">set(BOOK2_DIR "${CMAKE_BINARY_DIR}/MetalCppTinyRenderer")
+set(BOOK2_METALLIB "${BOOK2_DIR}/default.metallib")
+add_custom_command(
+    OUTPUT "${BOOK2_METALLIB}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${BOOK2_DIR}/ModuleCache"
+    COMMAND xcrun -sdk macosx metal
+            "-fmodules-cache-path=${BOOK2_DIR}/ModuleCache"
+            -c "${CMAKE_CURRENT_SOURCE_DIR}/src/MetalCppTinyRenderer/Shaders.metal"
+            -o "${BOOK2_DIR}/Shaders.air"
+    COMMAND xcrun -sdk macosx metallib
+            "${BOOK2_DIR}/Shaders.air"
+            -o "${BOOK2_METALLIB}"
+    DEPENDS src/MetalCppTinyRenderer/Shaders.metal)</code></pre></figure>
+<h2 id="reference-code">Reference Code</h2>
+<p>The final reference code directory is <code>src/MetalCppTinyRenderer/</code>. If you want to check the final implementation, you can check the following file list:</p>
+<p>The following is also a directory listing, not a code block to be pasted into the source code.</p>
+<figure class="code-block"><figcaption class="code-title"><span>project layout</span></figcaption><pre><code class="language-text">src/MetalCppTinyRenderer/
+  main.cpp
+  Renderer.cpp
+  Shaders.metal
+assets/
+  meshes/uv_sphere.obj
+  meshes/stanford_bunny.obj
+  textures/warm_metal.ppm
+  textures/clay.ppm
+  textures/rusty_metal_02_basecolor.png
+  textures/rusty_metal_02_roughness.png
+  textures/rusty_metal_02_metallic.png
+  textures/rusty_metal_02_normal.png
+  textures/rusty_metal_02_ao.png
+  textures/README.md</code></pre></figure>
+<ul>
+<li><code>main.cpp</code>: Corresponds to `Mesh and Texture Input` and `Reference Code`, responsible for parsing mesh, texture, stage, and output path.</li>
+<li><code>Renderer.cpp</code>: Corresponds to `Device and Command Queue`, `Offscreen Render Target`, `Camera and Framing`, `Render Pass and Readback`, responsible for resource creation, draw call and image output.</li>
+<li><code>Shaders.metal</code>: Corresponds to `Vertex Shader`, `Texture Sampling`, `Rendering Progression`, including <code>vertex_main</code> and four fragment stages.</li>
+</ul>
+<p>Expected output:</p>
+<ul>
+<li><code>uv_sphere.obj</code> can generate four result images: `albedo`, `lambert`, `blinn`, and `pbr`.</li>
+<li><code>rusty_metal_02_basecolor.png</code> can generate a set of real PBR material result maps with the roughness, metallic, normal, and AO maps in the same directory.</li>
+<li><code>stanford_bunny.obj</code> can generate two result images: `lambert` and `blinn`.</li>
+<li>The output file format supports <code>P6 PPM</code>, <code>PNG</code> and <code>JPG</code>.</li>
+</ul>
+<p>The last paragraph is still a run command to verify that you have completed the final version of the entire book.</p>
+<figure class="code-block"><figcaption class="code-title"><span>terminal</span></figcaption><pre><code class="language-sh">cmake -S . -B build
+cmake --build build --target MetalCppTinyRenderer
+
+./build/MetalCppTinyRenderer/MetalCppTinyRenderer \
+  assets/meshes/uv_sphere.obj \
+  assets/textures/rusty_metal_02_basecolor.png \
+  pbr \
+  build/MetalCppTinyRenderer/09-rusty-metal-pbr.png</code></pre></figure>
+</main>
+</body>
+</html>
